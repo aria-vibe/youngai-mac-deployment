@@ -1,0 +1,1770 @@
+diff --git a/ds4_gpu_core.h b/ds4_gpu_core.h
+index 7fa0315..317777a 100644
+--- a/ds4_gpu_core.h
++++ b/ds4_gpu_core.h
+@@ -225,6 +225,11 @@ void ds4_gpu_set_expert_stage(int on);
+ uint64_t ds4_gpu_recommended_max_working_set_bytes(void);
+ /* Live GPU working-set (model wired + scratch). 0 on CPU build. */
+ uint64_t ds4_gpu_current_allocated_bytes(void);
++#if defined(__APPLE__) && !defined(DS4_NO_GPU)
++/* Monotonic, host-side Metal allocation/command-buffer OOM generation. */
++uint64_t ds4_gpu_memory_oom_epoch(void);
++void ds4_gpu_note_memory_oom(void);
++#endif
+ /* 设备名(Metal: MTLDevice.name; CUDA: cudaDeviceProp.name), 初始化前是空串。服务端监控页(/metrics hardware_static.gpu_name)用。 */
+ const char *ds4_gpu_device_name(void);
+ /* P2.1 cross-layer router prediction prefetch (project.md): register one routed
+diff --git a/metal/v41_attn.metal b/metal/v41_attn.metal
+index 95277a7..25f4f18 100644
+--- a/metal/v41_attn.metal
++++ b/metal/v41_attn.metal
+@@ -3,7 +3,7 @@
+ // 这里只有标量版: 一 threadgroup 8 个 simdgroup = 8 个头(CUDA 是 4 warp × 2 头, 键序与在线 softmax 的分块(8 键一块)一致)。
+ // posd 口径同 CUDA(ds4_gpu_v41.h "设备位置"): 非 NULL 时位置从 posd[0] 读, 主机的 ng/topk 当上限。必须排在 v41_common.metal 之后。
+ 
+-struct v41_attn_args { uint pos0, window, ng, topk, n_head, hd, full_block, ring, win_lo, has_posd, has_comp, pad; float scale; float pad1, pad2, pad3; };
++struct v41_attn_args { uint pos0, window, ng, topk, n_head, hd, full_block, ring, win_lo, has_posd, has_comp, pad; float scale; uint ratio; float pad2, pad3; };
+ // 窗口缓冲里绝对位置 a 住第几行(decode.md D1): 本批段 [window, window+n); 历史段 ring=1 环 / ring=0 线性
+ inline uint v41_win_row(int a, uint pos0, uint window, uint ring) {
+     if (a >= (int)pos0) return window + (uint)(a - (int)pos0);
+@@ -220,8 +220,15 @@ kernel void kernel_v41_sparse_attn_split(constant v41_attn_args &a [[buffer(0)]]
+     const uint nwin = last - lo + 1u;
+     const uint topk = a.has_comp ? a.topk : 0u;
+     const uint nkeys = nwin + topk;
+-    const uint chunk = ((nkeys + S - 1u) / S + 7u) & ~7u;
+-    const uint kb = sp * chunk, ke = min(nkeys, kb + chunk);
++    /* The host allocates for the largest row, but each causal row uses exactly
++     * its single-token key count and partitioning. Batch-end ng/topk can include
++     * future groups (-1 index padding); counting them changes bf16 softmax. */
++    const uint visible = a.has_comp && a.ratio ? min(topk, (p + 1u) / a.ratio) : topk;
++    const uint keys = a.full_block ? nkeys : nwin + visible;
++    const uint estimate = min(p + 1u, a.window + 1u) + min(a.ng, visible);
++    const uint row_s = a.full_block ? S : clamp((estimate + 31u) / 32u, 1u, 32u);
++    const uint chunk = ((keys + row_s - 1u) / row_s + 7u) & ~7u;
++    const uint kb = sp * chunk, ke = sp < row_s ? min(keys, kb + chunk) : 0u;
+     for (uint base = kb; base < ke; base += 8u) {
+         const uint nt = (ke - base) < 8u ? (ke - base) : 8u;
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+diff --git a/metal/v41_dense.metal b/metal/v41_dense.metal
+index 1e60007..c4a4eda 100644
+--- a/metal/v41_dense.metal
++++ b/metal/v41_dense.metal
+@@ -60,7 +60,8 @@ template [[host_name("kernel_v41_gemv_nt6")]] kernel v41_gemv_t kernel_v41_gemv<
+ template [[host_name("kernel_v41_gemv_nt7")]] kernel v41_gemv_t kernel_v41_gemv<7>;
+ template [[host_name("kernel_v41_gemv_nt8")]] kernel v41_gemv_t kernel_v41_gemv<8>;
+ 
+-// ---- q4_K、n_tok == 1 的 GEMV(2026-10-17 M5 提速): 移植自 llama.cpp kernel_mul_mv_q4_K_f32_impl(MIT, ggml-org/llama.cpp)。
++// ---- q4_K GEMV: each token runs identical arithmetic (grid.z selects token).
++// 移植自 llama.cpp kernel_mul_mv_q4_K_f32_impl(MIT, ggml-org/llama.cpp)。
+ // 每 simdgroup 2 行, 每 threadgroup 2 个 simdgroup(64 线程); 一 lane 的 32 个 x 读进寄存器后两行复用; 16 位读量化字节 + 掩码不移位;
+ // min 项按块 Σx 提出来。累加序与 kernel_v41_gemv<1> 不同 ⇒ 门是 NLL。要求 out_dim % 4 == 0、in_dim % 256 == 0(主机校验)。
+ #define V41_Q4K_NR0 2
+@@ -69,10 +70,12 @@ kernel void kernel_v41_gemv_q4k_ll(constant v41_gemv_args &a [[buffer(0)]], devi
+                                    device float *out [[buffer(3)]], device const int *skip [[buffer(4)]],
+                                    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],
+                                    ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+-    if (a.has_skip != 0u && skip[0] >= 0) return;
++    const uint t = tgpig.z;
++    if (a.has_skip != 0u && skip[t] >= 0) return;
+     constexpr ushort kmask1 = 0x3f3f, kmask2 = 0x0f0f, kmask3 = 0xc0c0;
+     const uint g = tgpig.y;
+-    x += (ulong)g * a.x_gstride; out += (ulong)g * a.out_gstride;
++    x += (ulong)t * a.x_stride + (ulong)g * a.x_gstride;
++    out += (ulong)t * a.out_stride + (ulong)g * a.out_gstride;
+     const short ix = tiisg / 8, it = tiisg % 8, iq = it / 4, ir = it % 4;
+     const uint nb = a.in_dim / 256u, rowb = nb * 144u;
+     const uint first_row = (tgpig.x * V41_Q4K_NSG + sgitg) * V41_Q4K_NR0;
+diff --git a/metal/v41_layer.metal b/metal/v41_layer.metal
+index 3bd8f29..30d3fee 100644
+--- a/metal/v41_layer.metal
++++ b/metal/v41_layer.metal
+@@ -168,12 +168,14 @@ kernel void kernel_v41_engram_gate(constant v41_n_args &a [[buffer(0)]], device
+     for (uint d = tid; d < E; d += 256u) h[d] = v41_bf16r(h[d] + gate * val[d]);
+ }
+ // 路由(官方 Gate: probs = √softplus; 按 probs+bias 选 topk; weights = probs/Σ·route_scale): 一 simdgroup 一 token, lane 持 12 个专家
+-struct v41_router_args { uint n_tok, n_expert, topk, pad; float route_scale; float pad1, pad2, pad3; };
++struct v41_router_args { uint n_tok, n_expert, topk, has_vl; float route_scale; float pad1, pad2, pad3; };
+ kernel void kernel_v41_router(constant v41_router_args &a [[buffer(0)]], device int *sel [[buffer(1)]], device float *wts [[buffer(2)]],
+-                              device const float *logits [[buffer(3)]], device const float *bias [[buffer(4)]],
++                              device const float *logits [[buffer(3)]], device const float *bias_txt [[buffer(4)]],
++                              device const float *bias_vl [[buffer(5)]], device const int *vl_rows [[buffer(6)]],
+                               uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+     const uint t = gid >> 5;
+     if (t >= a.n_tok) return;
++    device const float *bias = a.has_vl && vl_rows[t] >= 0 ? bias_vl : bias_txt;
+     device const float *lg = logits + (ulong)t * a.n_expert;
+     float pr[12], sc[12];
+     for (uint k = 0; k < 12u; k++) {
+diff --git a/metal/v41_vision.metal b/metal/v41_vision.metal
+new file mode 100644
+index 0000000..3c6aca0
+--- /dev/null
++++ b/metal/v41_vision.metal
+@@ -0,0 +1,103 @@
++// Request-local vision tower. Concatenated after v41_common and unary (erf).
++kernel void kernel_v41_vis_bias(constant v41_n_args &a [[buffer(0)]], device float *x [[buffer(1)]],
++                                device const float *b [[buffer(2)]], uint i [[thread_position_in_grid]]) {
++    if (i < a.n0) x[i] = v41_bf16r(x[i] + b[i % a.n1]);
++}
++kernel void kernel_v41_vis_rope(constant v41_n_args &a [[buffer(0)]], device float *qkv [[buffer(1)]], uint i [[thread_position_in_grid]]) {
++    const uint rd = a.n3 / 2u, nf = rd / 2u;
++    if ((ulong)i >= (ulong)a.n0 * a.n2 * rd) return;
++    const uint j = i % rd, h = (i / rd) % a.n2, t = i / (rd * a.n2);
++    const uint fi = j < nf ? j : j - nf;
++    const float pos = j < nf ? float(t / a.n1) : float(t % a.n1);
++    const float f = pos / pow(a.f0, float(2u * fi) / float(rd)), c = cos(f), s = sin(f);
++    for (uint part = 0; part < 2u; part++) {
++        device float *b = qkv + ((ulong)t * 3u * a.n2 + part * a.n2 + h) * a.n3;
++        const float x1 = b[j], x2 = b[j + rd];
++        b[j] = v41_bf16r(x1 * c - x2 * s); b[j + rd] = v41_bf16r(x2 * c + x1 * s);
++    }
++}
++// P occupies S's buffer. Preserve CUDA's BF16 softmax boundary before P*V.
++kernel void kernel_v41_vis_softmax(constant v41_n_args &a [[buffer(0)]], device float *p [[buffer(1)]],
++                                   uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
++    threadgroup float red[256];
++    device float *s = p + (ulong)row * a.n0;
++    float m = -INFINITY;
++    for (uint k = tid; k < a.n0; k += 256u) m = max(m, s[k] * a.f0);
++    red[tid] = m; threadgroup_barrier(mem_flags::mem_threadgroup);
++    for (uint d = 128u; d; d >>= 1u) {
++        if (tid < d) red[tid] = max(red[tid], red[tid + d]);
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++    }
++    m = red[0]; threadgroup_barrier(mem_flags::mem_threadgroup);
++    float sum = 0.0f;
++    for (uint k = tid; k < a.n0; k += 256u) sum += exp(s[k] * a.f0 - m);
++    const float den = v41_tg_sum(sum, red, tid, 256u);
++    for (uint k = tid; k < a.n0; k += 256u) s[k] = v41_bf16r(exp(s[k] * a.f0 - m) / den);
++}
++kernel void kernel_v41_vis_swiglu(constant v41_n_args &a [[buffer(0)]], device float *h [[buffer(1)]],
++                                  device const float *gu [[buffer(2)]], uint i [[thread_position_in_grid]]) {
++    if (i >= a.n0) return;
++    const ulong base = (ulong)(i / a.n1) * 2u * a.n1 + i % a.n1;
++    const float g = gu[base], u = gu[base + a.n1];
++    h[i] = v41_bf16r((g / (1.0f + exp(-g))) * u);
++}
++kernel void kernel_v41_vis_gelu(device float *x [[buffer(0)]], constant ulong &n [[buffer(1)]], uint i [[thread_position_in_grid]]) {
++    if ((ulong)i < n) {
++        const float v = x[i];
++        // A&S 7.1.26 error <=1.5e-7; erf-GELU rather than tanh-GELU.
++        x[i] = v41_bf16r(0.5f * v * (1.0f + erf_approx<float>(v * 0.70710678118654752f)));
++    }
++}
++kernel void kernel_v41_vis_unfold(constant v41_n_args &a [[buffer(0)]], device float *out [[buffer(1)]], device const float *x [[buffer(2)]],
++                                  constant ulong &n [[buffer(3)]], uint i [[thread_position_in_grid]]) {
++    if ((ulong)i >= n) return;
++    const uint r = a.n3, ow = (a.n1 + r - 1u) / r, cols = a.n2 * r * r;
++    const uint col = i % cols, cell = i / cols, c = col / (r * r), rem = col % (r * r);
++    const uint pi = (cell / ow) * r + rem / r, pj = (cell % ow) * r + rem % r;
++    out[i] = pi < a.n0 && pj < a.n1 ? x[((ulong)pi * a.n1 + pj) * a.n2 + c] : 0.0f;
++}
++kernel void kernel_v41_vis_select(constant v41_n_args &a [[buffer(0)]], device float *x [[buffer(1)]], device const float *src [[buffer(2)]],
++                                  device const int *rows [[buffer(3)]], uint i [[thread_position_in_grid]]) {
++    if (i >= a.n0) return;
++    const int r = rows[i / a.n1];
++    if (r >= 0 && (uint)r < a.n2) x[i] = src[(ulong)r * a.n1 + i % a.n1];
++}
++kernel void kernel_v41_vis_zero(constant v41_n_args &a [[buffer(0)]], device float *x [[buffer(1)]], device const int *rows [[buffer(2)]],
++                                uint i [[thread_position_in_grid]]) {
++    if (i < a.n0 && rows[i / a.n1] >= 0) x[i] = 0.0f;
++}
++// Patch projection has K=3*14*14=588, not divisible by eight. Generic wgemm's
++// vector decoder requires K%8==0, so guard each scalar load in this tail path.
++kernel void kernel_v41_vis_wgemm(constant v41_wgemm_args &a [[buffer(0)]], device const ushort *w [[buffer(1)]],
++                                 device const float *x [[buffer(2)]], device float *out [[buffer(3)]], device const uchar *unused [[buffer(4)]],
++                                 uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
++                                 uint sg [[simdgroup_index_in_threadgroup]]) {
++    (void)unused;
++    threadgroup float As[64*16],Bs[16*64],Cs[64*64];
++    const uint m0=tg.y*64u,n0=tg.x*64u,sm=(sg>>1)*32u,sn=(sg&1u)*32u;
++    simdgroup_float8x8 acc[4][4];
++    for(uint i=0;i<4;i++)for(uint j=0;j<4;j++)acc[i][j]=simdgroup_float8x8(0.f);
++    for(uint k0=0;k0<a.K;k0+=16u) {
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        for(uint e=tid;e<1024u;e+=128u) {
++            const uint m=m0+e/16u,k=k0+e%16u;
++            As[e]=m<a.M && k<a.K?x[(ulong)m*a.K+k]:0.f;
++            const uint wk=k0+e/64u,n=n0+e%64u;
++            Bs[e]=wk<a.K && n<a.N?as_type<float>((uint)w[(ulong)n*a.K+wk]<<16u):0.f;
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        for(uint kk=0;kk<16u;kk+=8u) {
++            simdgroup_float8x8 ma[4],mb[4];
++            for(uint i=0;i<4;i++)simdgroup_load(ma[i],As+(sm+8u*i)*16u+kk,16);
++            for(uint j=0;j<4;j++)simdgroup_load(mb[j],Bs+kk*64u+sn+8u*j,64);
++            for(uint i=0;i<4;i++)for(uint j=0;j<4;j++)simdgroup_multiply_accumulate(acc[i][j],ma[i],mb[j],acc[i][j]);
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    for(uint i=0;i<4;i++)for(uint j=0;j<4;j++)simdgroup_store(acc[i][j],Cs+(sm+8u*i)*64u+sn+8u*j,64);
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    for(uint e=tid;e<4096u;e+=128u) {
++        const uint m=m0+e/64u,n=n0+e%64u;
++        if(m<a.M && n<a.N)out[(ulong)m*a.N+n]=Cs[e];
++    }
++}
+diff --git a/src/core/core_v41.h b/src/core/core_v41.h
+index 7704d9d..a90caeb 100644
+--- a/src/core/core_v41.h
++++ b/src/core/core_v41.h
+@@ -311,6 +311,7 @@ void v41_state_free(ds4_v41_state *st);
+  * 请求态预填完 v41_state_shrink: 稠密段的行放掉、注意力侧缩到 rcap 行, 只剩 KV + 几十 MB; 批态(v41_batch_rows_alloc)持有稠密段的
+  * R 行缓冲 + 反修表; v41_multi_step 一步喂 R 个请求态各 1 个 token(稠密段拼行一次发, 注意力段逐请求用视图发)。 */
+ bool v41_state_shrink(ds4_v41_state *st, uint32_t rcap);
++bool v41_state_decode_shrink(ds4_v41_state *st, uint32_t rcap);
+ bool v41_state_clone(ds4_v41_state *dst, const ds4_v41_state *src);
+ /* ★合批纯解码一步最多几行(2026-10-10)★: 与 DS4_V41_GEMV_MAX_TOK(8, 解码小批核与预填 GEMM 的分界, 单请求路/验证批/打分路都按它分岔)分开 ——
+  * 合批行数超过 8 时稠密段各核按行数自己走预填路, 不改任何 ≤ 8 行的路径。批态 / 合批步 / 生成驱动的数组按它开。 */
+@@ -343,6 +344,15 @@ bool v41_multi_pick(ds4_v41_batch *b, ds4_v41_state *m, uint32_t row, float *row
+ bool v41_multi_pick_rows(ds4_v41_batch *b, ds4_v41_state *m, uint32_t row0, uint32_t rows, const int32_t *batch, int32_t *want);   /* 验证批 rows 行一次取(设备路) */
+ /* 一块预填(单请求路 generate_argmax 与并发路 ds4_v41_req_prefill_step 共用: 分块 / CED / 窗口尾规则只写这一处, core_v41_forward.c) */
+ bool v41_prefill_chunk(ds4_engine *e, ds4_v41_state *st, const int32_t *prompt, uint32_t np, uint32_t *c0, uint32_t cap);
++uint32_t v41_prefill_next_rows(uint32_t remaining, uint32_t cap, uint32_t replay);
++typedef bool (*v41_prefill_step_fn)(ds4_engine *, ds4_v41_state *, const int32_t *, uint32_t, uint32_t *, uint32_t);
++uint64_t v41_prefill_oom_epoch(void);
++uint64_t v41_prefill_estimate_bytes(uint32_t rows, uint32_t ctx);
++uint32_t v41_prefill_choose_rows(uint32_t ceiling, uint32_t remaining, uint32_t ctx, uint64_t room);
++bool v41_prefill_alloc(ds4_engine *e, ds4_v41_state *st, const int32_t *prompt, uint32_t np, uint32_t ctx,
++                       uint32_t ceiling, const uint64_t *sig, uint32_t *reused);
++bool v41_prefill_run(ds4_engine *e, ds4_v41_state *st, const int32_t *prompt, uint32_t np,
++                     const uint64_t *sig, uint32_t *reused, ds4_v41_progress_fn progress, void *ud, v41_prefill_step_fn step);
+ bool v41_hc_half(ds4_engine *e, ds4_v41_state *st, const ds4_layer_weights *l, bool attn_half);   /* core_v41_forward.c: 半层入口三件 */
+ bool v41_moe(const ds4_model *m, const ds4_layer_weights *l, ds4_v41_state *st, uint32_t il);      /* core_v41_forward.c: MoE(含反修应用) */
+ bool v41_engram_rows(ds4_engine *e, ds4_v41_state *st, uint32_t il);    /* core_v41_engram.c: 收行 → 上传 → 解码行进 st->erows(按请求) */
+@@ -359,6 +369,9 @@ void v41_kvreuse_save(const ds4_v41_state *st, const int32_t *prompt, uint32_t n
+ void v41_kvreuse_save_end(const ds4_v41_state *st, const int32_t *prompt, uint32_t np, const uint64_t *sig,
+                           const int32_t *fed, uint32_t nf, uint32_t logit_row);   /* fed = 真喂进 KV 的生成 token; logit_row = 末位 logits 所在行 */
+ uint32_t v41_kvreuse_restore(ds4_v41_state *st, const int32_t *prompt, uint32_t np, const uint64_t *sig);
++uint32_t v41_kvreuse_planned(const int32_t *prompt, uint32_t np, const uint64_t *sig);
++bool v41_kvreuse_alloc(ds4_v41_state *st, const int32_t *prompt, uint32_t np,
++                       uint32_t ctx, uint32_t chunk, const uint64_t *sig, uint32_t *reused);
+ void v41_kvreuse_drop(void);   /* 作废检查点但留着它的提示 token(ds4_engine_v41_kv_stale_prompt 取, 切换插件后预热用) */
+ #define DS4_V41_LOGIT_LOG 1024   /* 逐步 logits 指纹最多记几步(core_v41_sample.c) */
+ void v41_logit_log_reset(void);
+diff --git a/src/core/core_v41_api.c b/src/core/core_v41_api.c
+index 128c9dd..46e176d 100644
+--- a/src/core/core_v41_api.c
++++ b/src/core/core_v41_api.c
+@@ -151,9 +151,11 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
+     const int room = ctx > np ? (int)(ctx - np) : 0;
+     if (n_predict > room) n_predict = room;
+     const uint32_t ck = g_ds4_v41_chunk > 0 ? (uint32_t)g_ds4_v41_chunk : DS4_V41_CHUNK;
+-    const uint32_t cap = ck < np ? ck : np;
++    const double t0 = now_sec();
++    const uint64_t *isig = imgs ? imgs->sig_of : NULL;
++    uint32_t reused = 0;
+     ds4_v41_state st;
+-    if (!v41_state_alloc(&st, cap, ctx, DS4_MTP_MAX_BLOCK + 2u)) return 1;   /* 生成路: logits 只要解码/验证批那几行 + 预填末位 */
++    if (!v41_prefill_alloc(e, &st, prompt, np, ctx, ck, isig, &reused)) return 1;
+     st.head_last_only = 1;   /* 预填块只算末位 logits(core_v41.h) */
+     st.half_prefill = 1;     /* 推理路: 预填快核(core_v41.h) */
+     ds4_gpu_tensor *am = ds4_gpu_tensor_alloc((uint64_t)(DS4_MTP_MAX_BLOCK + 2u) * 16u);   /* 设备槽: 每行 16 B(采样核 4 个 int; argmax 只用第 0 个) */
+@@ -198,24 +200,11 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
+         /* --emit-trace 连提示也打(`[ptok] 位置 id`): 提示是 build_prompt 套过聊天模板的(比 --dump-tokens 的原文分词多
+          * BOS/角色/think 几个 token, 09-20 实撞 79 vs 75), 事后重新分词拼不回引擎真吃的序列; 教师锚/取料要的是这一份。 */
+         if (g_ds4_v41_emit_trace) for (uint32_t i = 0; i < np; i++) fprintf(stderr, "[ptok] %u %d\n", i, prompt[i]);
+-        const double t0 = now_sec();
+-        bool ok = true, aborted = false;
+-        const uint64_t *isig = imgs ? imgs->sig_of : NULL;   /* 图片位的指纹: 同占位 token 不同图不许接上一条的 KV */
+-        const uint32_t reused = v41_kvreuse_restore(&st, prompt, np, isig);   /* 提示以上一条的提示开头 ⇒ 从那里接着填(core_v41_kvreuse.c) */
+         st.vimg = imgs;   /* 预填块按位置盖视觉嵌入(core_v41_forward.c); 预填完清掉 */
+-        for (uint32_t c0 = reused; ok && c0 < np; ) {
+-            ok = v41_prefill_chunk(e, &st, prompt, np, &c0, cap);   /* 分块 / CED / 窗口尾规则在 core_v41_forward.c, 与并发路同一份 */
+-            /* 回调非 0 = 调用方不要这趟了(服务端: 客户端已挂断)。立刻停, 别把剩下的块算完 —— 13 万 token
+-             * 的提示预填 400 秒, 算给一个走掉的连接就是让后面排队的请求跟着超时(2026-09-22 早盘实撞)。 */
+-            if (ok && g_v41_progress &&
+-                g_v41_progress(g_v41_progress_ud, "prefill_chunk", (int)c0, (int)np) != 0) {
+-                fprintf(stderr, "[v41] 预填在 %u/%u 处按调用方要求中止\n", c0, np);
+-                aborted = true;
+-                break;
+-            }
+-        }
++        bool ok = v41_prefill_run(e, &st, prompt, np, isig, &reused,
++                                  g_v41_progress, g_v41_progress_ud, v41_prefill_chunk);
+         st.vimg = NULL;
+-        if (!ok || aborted) break;
++        if (!ok) break;
+         if (reused < np) v41_kvreuse_save(&st, prompt, np, isig);   /* 解码前存提示末尾的检查点, 给下一条请求接(同提示整份接上的, 检查点就是它, 不重存) */
+         const double t1 = now_sec();
+         fprintf(stderr, "[v41] prefill %u token %.1fs (%.1f t/s)\n", np - reused, t1 - t0, (double)(np - reused) / (t1 - t0 + 1e-9));
+@@ -245,6 +234,11 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
+          * 不接受的位置全部回滚。所以它是纯粹的省时间, 不是近似 —— 门也就是逐字节同。
+          * ★采样下(2026-09-28)★: 接受 ⇔ 均匀数 < 目标分布给草稿的概率, 拒绝从残差抽(设备核里做); 吐出 token 的边缘分布 = 纯解码采样的分布,
+          * 但同 seed 下两条路的具体 token 不同(用了不同的硬币) —— 门是分布级(tests/cuda_sample_selftest.c), 不是逐字节。 */
++        if (e->backend == DS4_BACKEND_METAL) {
++            if (!v41_state_decode_shrink(&st, dspark ? DS4_MTP_MAX_BLOCK + 1u : 1u)) break;
++            const uint64_t freed = ds4_gpu_v41_scratch_release();
++            fprintf(stderr, "[v41] decode buffers: %u rows, released %.1f MiB backend scratch\n", st.cap_tok, (double)freed / (1024.0 * 1024.0));
++        }
+         ds4_v41_draft dr;
+         const bool spec = dspark && v41_draft_alloc(e, &dr);
+         /* ★采样 + 投机: 草稿按塔的分布抽(硬币流 1), 验证核读塔 logits 做拒绝采样(接受 ⇔ u < min(1,p/q), 拒绝从 max(0,p−q) 抽)★(2026-09-29)
+@@ -453,9 +447,17 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
+         const int n_out = produced - (hit_eos ? 1 : 0);   /* 真吐出的 token 数, 与服务端 usage.completion_tokens 同口径 */ if (n_out > 0) fprintf(stderr, "\n[v41] decode %d token %.1fs (%.2f t/s)\n", n_out, t2 - t1, (double)n_out / (t2 - t1 + 1e-9));
+         rc = ok ? 0 : 1;
+     } while (0);
++    /* Failure and cancellation may leave async copies pending. Release their
++     * resources only after the queue has drained, just as on the success path. */
++    if (!ds4_gpu_synchronize()) rc = 1;
+     free(rowbuf); free(hist.tok); free((void *)hist.brk); free(fed);
+     if (am) ds4_gpu_tensor_free(am);
+     v41_state_free(&st);
++    if (e->backend == DS4_BACKEND_METAL) {
++        const uint64_t freed = ds4_gpu_v41_scratch_release();
++        fprintf(stderr, "[v41] request cleanup: rc=%d scratch_freed=%.2f MiB metal_allocated=%.2f MiB\n",
++                rc, (double)freed / 1048576., (double)ds4_gpu_current_allocated_bytes() / 1048576.);
++    }
+     return rc;
+ }
+ #else
+diff --git a/src/core/core_v41_engram.c b/src/core/core_v41_engram.c
+index 61de623..641a197 100644
+--- a/src/core/core_v41_engram.c
++++ b/src/core/core_v41_engram.c
+@@ -429,7 +429,7 @@ bool v41_engram_rows(ds4_engine *e, ds4_v41_state *st, uint32_t il) {
+     const uint32_t n = st->n, HC = DS4_N_HC, HD = J->HD, cols = J->cols, stride = J->HD + J->nsc;
+     const uint64_t in_dim = (uint64_t)cols * HD, out_dim = (uint64_t)(HC + 1) * DS4_N_EMBD;
+     if (!st->erows) {   /* 单请求路: 三块按 cap 懒建; 并发的请求态 erows 是视图、eraw 在收缩时建, 不进这里 */
+-        for (uint32_t k = 0; k < J->n_eng; k++) st->eraw[k] = ds4_gpu_tensor_alloc((uint64_t)st->cap_tok * cols * stride);
++        for (uint32_t k = 0; k < J->n_eng; k++) if (!st->eraw[k]) st->eraw[k] = ds4_gpu_tensor_alloc((uint64_t)st->cap_tok * cols * stride);
+         st->erows = ds4_gpu_tensor_alloc((uint64_t)st->cap_tok * in_dim * 4);
+         st->ekv = ds4_gpu_tensor_alloc((uint64_t)st->cap_tok * out_dim * 4);
+     }
+diff --git a/src/core/core_v41_forward.c b/src/core/core_v41_forward.c
+index 3562a97..9bfd8d0 100644
+--- a/src/core/core_v41_forward.c
++++ b/src/core/core_v41_forward.c
+@@ -393,10 +393,17 @@ bool v41_forward_body(ds4_engine *e, ds4_v41_state *st) {
+  * ★判负存档(2026-09-29)★: 试过"最后一块只留正好 window 个"(CFO 14103 token 预填 15.1 → 13.8 s) —— 最后 window 位的解码器窗口被截到块头,
+  * 隐态变差: 同一 CFO 请求投机接受 1.87 → 1.41/5 位、解码 43.5 → 38.3 t/s, 文本第 1 字就变。质量不为速度让步, 回退。
+  * CED: 除最后一块外, 只跑编码器段 + 分界层 KV(最后一块同时充当官方说的"解码器有界回放")。 */
++uint32_t v41_prefill_next_rows(uint32_t remaining, uint32_t cap, uint32_t replay) {
++    uint32_t nc = remaining < cap ? remaining : cap;
++    const uint32_t tail = replay > DS4_N_SWA && replay <= cap ? replay : DS4_N_SWA;
++    const uint32_t rest = remaining - nc;
++    /* Adaptive chunk boundaries must not shorten the configured decoder
++     * replay (140 rows by default) to the 128-row SWA window. */
++    if (rest > 0u && rest < tail && nc >= tail) nc -= tail - rest;
++    return nc;
++}
+ bool v41_prefill_chunk(ds4_engine *e, ds4_v41_state *st, const int32_t *prompt, uint32_t np, uint32_t *c0, uint32_t cap) {
+-    uint32_t nc = np - *c0 < cap ? np - *c0 : cap;
+-    const uint32_t rest = np - *c0 - nc;
+-    if (rest > 0u && rest < DS4_N_SWA && nc > DS4_N_SWA) nc -= DS4_N_SWA - rest;
++    const uint32_t nc = v41_prefill_next_rows(np-*c0, cap, st->head_last_only ? (uint32_t)g_ds4_v41_replay : 0);
+     st->ced_skip = (!g_ds4_v41_decoder_full && *c0 + nc < np) ? 1 : 0;
+     if (!v41_forward(e, st, prompt + *c0, nc)) return false;
+     *c0 += nc;
+@@ -444,8 +451,10 @@ bool v41_forward(ds4_engine *e, ds4_v41_state *st, const int32_t *ids, uint32_t
+     const bool body_ok = v41_forward_body(e, st);
+     (void)ds4_gpu_v41_set_half_prefill(0);
+     st->vrows_on = 0;   /* 图片行只属于这一块 */
+-    if (!body_ok) return false;
+-    if (ds4_gpu_end_commands() == 0 || ds4_gpu_synchronize() == 0) return false;
++    /* Close even a partial forward: leaving a batch open pins its resources
++     * and makes the next request fail at begin_commands. */
++    const bool end_ok = ds4_gpu_end_commands() != 0;
++    if (!body_ok || !end_ok || ds4_gpu_synchronize() == 0) return false;
+     if (st->mainh && st->mainh_wrote) {   /* mainh 环的账: 与上一段连续就接着数, 断了(CED 跳过的块)就从头数。st->n/pos0: 回放块里被截成末尾 K 行 */
+         const int64_t first = (int64_t)st->pos0 + (int64_t)(st->n - st->mainh_wrote);
+         const bool contig = st->mainh_n > 0 && st->mainh_end == first - 1;
+diff --git a/src/core/core_v41_kvreuse.c b/src/core/core_v41_kvreuse.c
+index 9fdec63..f37eabc 100644
+--- a/src/core/core_v41_kvreuse.c
++++ b/src/core/core_v41_kvreuse.c
+@@ -171,16 +171,59 @@ static bool sig_match(const ckpt *k, const uint64_t *a, uint32_t n) {
+ 
+ /* 新状态刚分配完(预填前)调: 能接上就把检查点拷进 st, 返回预填起点(= 检查点位置; = np 时一块都不用填, 末位 logits 已在第 0 行);
+  * 接不上返回 0(整段预填)。两槽都接得上取长的(槽 1 ⊇ 槽 0 时它更长)。 */
+-uint32_t v41_kvreuse_restore(ds4_v41_state *st, const int32_t *prompt, uint32_t np, const uint64_t *sig) {
+-    g_last_reused = 0;
+-    if (!g_ds4_v41_kv_reuse) return 0;
++static const ckpt *ckpt_match(const int32_t *prompt, uint32_t np, const uint64_t *sig) {
++    if (!g_ds4_v41_kv_reuse) return NULL;
+     const ckpt *k = NULL;
+     for (int s = 0; s < CK_SLOTS; s++) {
+         const ckpt *c = &K[s];
+-        if (!c->valid || c->n > np || c->n > st->ctx || (k && c->n <= k->n)) continue;
++        if (!c->valid || c->n > np || (k && c->n <= k->n)) continue;
+         if (memcmp(c->tok, prompt, (size_t)c->n * 4) || !sig_match(c, sig, c->n)) continue;
+         k = c;
+     }
++    return k;
++}
++
++uint32_t v41_kvreuse_planned(const int32_t *prompt, uint32_t np, const uint64_t *sig) {
++    const ckpt *k = ckpt_match(prompt, np, sig);
++    return k ? k->n : 0;
++}
++
++/* Match before allocating rows: a 70K-token prefix plus five new tokens must
++ * not allocate a 2048-row prefill workspace. Keep enough rows for DSpark even
++ * on an exact hit. The context/KV capacity still covers the entire request. */
++bool v41_kvreuse_alloc(ds4_v41_state *st, const int32_t *prompt, uint32_t np,
++                       uint32_t ctx, uint32_t chunk, const uint64_t *sig, uint32_t *reused) {
++    const ckpt *k = ckpt_match(prompt, np, sig);
++    const uint32_t planned = k ? k->n : 0, remaining = np - planned;
++    uint32_t rows = remaining < chunk ? remaining : chunk;
++    const uint32_t floor = DS4_MTP_MAX_BLOCK + 2u;
++    if (rows < floor) rows = floor;
++    if (rows > ctx) rows = ctx;
++    *reused = 0;
++    if (!v41_state_alloc(st, rows, ctx, floor)) return false;
++    const uint64_t epoch = v41_prefill_oom_epoch();
++    *reused = v41_kvreuse_restore(st, prompt, np, sig);
++    if (planned && *reused != planned) {
++        /* A failed copy may have queued writes into the partial state. Drain
++         * it before freeing, then cold-prefill a fresh, full-sized workspace. */
++        (void)ds4_gpu_synchronize();
++        v41_state_free(st);
++        if (v41_prefill_oom_epoch() != epoch) return false;
++        rows = np < chunk ? np : chunk;
++        if (rows < floor) rows = floor;
++        if (rows > ctx) rows = ctx;
++        if (!v41_state_alloc(st, rows, ctx, floor)) return false;
++        *reused = 0;
++    }
++    fprintf(stderr, "[v41] request workspace: prompt=%u reused=%u pending=%u rows=%u ctx=%u\n",
++            np, *reused, np - *reused, rows, ctx);
++    return true;
++}
++
++uint32_t v41_kvreuse_restore(ds4_v41_state *st, const int32_t *prompt, uint32_t np, const uint64_t *sig) {
++    g_last_reused = 0;
++    const ckpt *k = ckpt_match(prompt, np, sig);
++    if (k && k->n > st->ctx) k = NULL;
+     if (!k) return 0;
+     const uint64_t rowb = (uint64_t)DS4_N_HEAD_DIM * 4;
+     bool ok = true;
+diff --git a/src/core/core_v41_prefill.c b/src/core/core_v41_prefill.c
+new file mode 100644
+index 0000000..d9e9f44
+--- /dev/null
++++ b/src/core/core_v41_prefill.c
+@@ -0,0 +1,149 @@
++/* Memory-aware Metal prefill. Failed forwards have already mutated KV/windows:
++ * never retry in-place. Drain, destroy, and restore an immutable checkpoint. */
++#include "core_internal.h"
++#ifndef DS4_NO_GPU
++
++/* Keep a full SWA window plus decoder replay in the smallest large-prompt
++ * chunk. Short suffixes still allocate only their actual rows (minimum 10). */
++#define V41_PREFILL_MIN_ROWS 256u
++#define V41_PREFILL_RESERVE (256ull * 1024 * 1024)
++
++uint64_t v41_prefill_oom_epoch(void) {
++#if defined(__APPLE__)
++    return ds4_gpu_memory_oom_epoch();
++#else
++    return 0;
++#endif
++}
++
++uint64_t v41_prefill_estimate_bytes(uint32_t rows, uint32_t ctx) {
++    const uint64_t E = DS4_N_EMBD, HC = DS4_N_HC, HD = DS4_N_HEAD_DIM;
++    const uint64_t SW = DS4_N_SWA, IK = DS4_N_INDEXER_HEAD_DIM, IH = DS4_N_INDEXER_HEAD;
++    /* Row tensors in core_v41_state.c, plus headroom for Metal kernel scratch
++     * and ordered-upload copies. A forecast, not a promise of allocation. */
++    uint64_t row = 4 * (3 + 2*HC*E + 6*E + 3*DS4_N_FF_EXP + 5*HC + 2*HC*HC +
++        DS4_N_EXPERT + 2*DS4_N_EXPERT_USED + 2*DS4_N_LORA_Q + 2*DS4_N_HEAD*HD +
++        6*HD + (uint64_t)DS4_N_OUT_GROUP*DS4_N_LORA_O + 1 + IK + IH*IK + IH + DS4_N_INDEXER_TOP_K);
++    uint64_t fixed = V41_PREFILL_RESERVE + E*4 + SW*HD*4 +
++        (uint64_t)(DS4_MTP_MAX_BLOCK + 2u)*DS4_N_VOCAB*4;
++    if (g_ds4_v41.mtp_block) fixed += SW*g_ds4_v41.n_mtp_target*E*4;
++    uint64_t groups = 0;
++    for (uint32_t l = 0; l < DS4_N_LAYER; l++) {
++        fixed += SW*HD*4; row += HD*4;
++        if (!g_ds4_v41.is_kv_source[l]) continue;
++        const uint32_t ratio = ds4_layer_compress_ratio(l);
++        if (!ratio) continue;
++        const uint64_t ng = (uint64_t)ctx/ratio + 2;
++        fixed += ng*(DS4_V41_CKV_BYTES + DS4_V41_IDXK_BYTES);
++        if (ng > groups) groups = ng;
++        if (ratio > 1) { fixed += (uint64_t)ratio*HD*8; row += HD*8; }
++    }
++    /* Index scores grow geometrically, and at most 64 query rows are scored
++     * together. Reserve the next growth bucket rather than just current ng. */
++    fixed += (rows < 64 ? rows : 64)*groups*8;
++    if (g_ds4_v41.candidate_source_layer >= 0 && g_ds4_v41.candidate_topk_blocks > 0)
++        row += 4ull*(1u + g_ds4_v41.candidate_topk_blocks);
++    const ds4_v41_cfg *v = &g_ds4_v41;
++    if (v->n_engram && v->engram_max_ngram > 1) {
++        const uint64_t cols = (uint64_t)(v->engram_max_ngram-1)*v->engram_heads;
++        row += v->n_engram*cols*(v->engram_head_dim + v->engram_head_dim/32u);
++        row += cols*v->engram_head_dim*4 + (HC+1)*E*4;
++    }
++    return fixed + (uint64_t)rows*(row + row/2);
++}
++
++uint32_t v41_prefill_choose_rows(uint32_t ceiling, uint32_t remaining, uint32_t ctx, uint64_t room) {
++    uint32_t rows = remaining < ceiling ? remaining : ceiling;
++    const uint32_t floor = DS4_MTP_MAX_BLOCK + 2u;
++    if (rows < floor) rows = floor;
++    if (rows > ctx) rows = ctx;
++    while (rows > V41_PREFILL_MIN_ROWS && v41_prefill_estimate_bytes(rows, ctx) > room) {
++        rows /= 2;
++        if (rows < V41_PREFILL_MIN_ROWS) rows = V41_PREFILL_MIN_ROWS;
++    }
++    return rows;
++}
++
++static bool metal(const ds4_engine *e) { return e->backend == DS4_BACKEND_METAL; }
++static uint64_t prefill_room(ds4_engine *e, uint64_t *base, uint64_t *limit) {
++    *base = ds4_gpu_current_allocated_bytes();
++    /* VQ model views are lazy; currentAllocated alone underestimates a cold
++     * request until its first MoE layer has mapped the model. */
++    if (*base < e->model.size) *base = e->model.size;
++    *limit = ds4_gpu_recommended_max_working_set_bytes();
++    const uint64_t budget = ds4_runtime_mem_budget_bytes();
++    if (budget && (!*limit || budget < *limit)) *limit = budget;
++    const uint64_t gpu = *limit > *base ? *limit - *base : 0;
++    const uint64_t host = ds4_runtime_mem_headroom_bytes();
++    return gpu < host ? gpu : host;
++}
++
++static uint32_t downshift(uint32_t rows) {
++    if (rows <= V41_PREFILL_MIN_ROWS) return 0;
++    rows /= 2;
++    return rows < V41_PREFILL_MIN_ROWS ? V41_PREFILL_MIN_ROWS : rows;
++}
++
++bool v41_prefill_alloc(ds4_engine *e, ds4_v41_state *st, const int32_t *prompt, uint32_t np, uint32_t ctx,
++                       uint32_t ceiling, const uint64_t *sig, uint32_t *reused) {
++    if (!metal(e)) return v41_kvreuse_alloc(st, prompt, np, ctx, ceiling, sig, reused);
++    const uint32_t pending = np - v41_kvreuse_planned(prompt, np, sig);
++    uint64_t base, limit;
++    const uint64_t room = prefill_room(e, &base, &limit);
++    uint32_t rows = v41_prefill_choose_rows(ceiling, pending, ctx, room);
++    fprintf(stderr, "[v41] adaptive prefill: pending=%u ceiling=%u rows=%u base=%.2f MiB limit=%.2f MiB room=%.2f MiB estimate=%.2f MiB\n",
++            pending, ceiling, rows, (double)base/1048576., (double)limit/1048576.,
++            (double)room/1048576., (double)v41_prefill_estimate_bytes(rows, ctx)/1048576.);
++    for (;;) {
++        const uint64_t epoch = v41_prefill_oom_epoch();
++        /* A tiny cached suffix can fall back to cold prefill if copying the
++         * checkpoint fails. That cold state still needs a replay-sized cap. */
++        const uint32_t chunk = rows < V41_PREFILL_MIN_ROWS && ceiling >= V41_PREFILL_MIN_ROWS ? V41_PREFILL_MIN_ROWS : rows;
++        if (v41_kvreuse_alloc(st, prompt, np, ctx, chunk, sig, reused)) return true;
++        (void)ds4_gpu_synchronize();
++        (void)ds4_gpu_v41_scratch_release();
++        const uint32_t next = downshift(rows);
++        if (v41_prefill_oom_epoch() == epoch || !next) return false;
++        fprintf(stderr, "[v41] prefill allocation OOM: rows=%u -> %u, rebuilding state\n", rows, next);
++        rows = next;
++    }
++}
++
++bool v41_prefill_run(ds4_engine *e, ds4_v41_state *st, const int32_t *prompt, uint32_t np,
++                     const uint64_t *sig, uint32_t *reused, ds4_v41_progress_fn progress, void *ud, v41_prefill_step_fn step) {
++    uint32_t c0 = *reused;
++    for (;;) {
++        const uint64_t epoch = v41_prefill_oom_epoch();
++        bool ok = true;
++        while (ok && c0 < np) {
++            ok = step(e, st, prompt, np, &c0, st->cap_tok);
++            if (ok && progress && progress(ud, "prefill_chunk", (int)c0, (int)np)) {
++                fprintf(stderr, "[v41] prefill cancelled at %u/%u\n", c0, np);
++                return false;
++            }
++        }
++        if (ok) return true;
++        (void)ds4_gpu_synchronize();
++        const uint32_t next = downshift(st->cap_tok);
++        if (!metal(e) || v41_prefill_oom_epoch() == epoch || !next) return false;
++        /* Check cancellation before expensive replay too. No generated token
++         * has been emitted; the request's RNG/sampling state is unchanged. */
++        if (progress && progress(ud, "prefill_chunk", (int)c0, (int)np)) return false;
++        const uint32_t ctx = st->ctx;
++        const ds4_gpu_sample_params samp = st->samp;
++        const int dev_sample = st->dev_sample;
++        const struct ds4_v41_images *images = st->vimg;
++        fprintf(stderr, "[v41] prefill OOM: at=%u/%u rows=%u -> %u; discard partial KV and restore checkpoint\n",
++                c0, np, st->cap_tok, next);
++        v41_state_free(st);
++        (void)ds4_gpu_v41_scratch_release();
++        if (!v41_prefill_alloc(e, st, prompt, np, ctx, next, sig, reused)) return false;
++        st->head_last_only = 1; st->half_prefill = 1;
++        st->samp = samp; st->dev_sample = dev_sample; st->vimg = images;
++        c0 = *reused;
++        fprintf(stderr, "[v41] prefill retry: resume=%u pending=%u rows=%u ctx=%u\n", c0, np-c0, st->cap_tok, ctx);
++    }
++}
++#else
++typedef int ds4_core_v41_prefill_nonempty_tu;
++#endif
+diff --git a/src/core/core_v41_state.c b/src/core/core_v41_state.c
+index 388abc3..df33aea 100644
+--- a/src/core/core_v41_state.c
++++ b/src/core/core_v41_state.c
+@@ -216,6 +216,19 @@ bool v41_state_shrink(ds4_v41_state *st, uint32_t rcap) {
+     return ok;
+ }
+ 
++/* Single-request generation owns its decode rows (unlike the batched request
++ * state). Reuse the KV-preserving shrink, then recreate only the small rows. */
++bool v41_state_decode_shrink(ds4_v41_state *st, uint32_t rcap) {
++    if (rcap >= st->cap_tok) return true;
++    if (!ds4_gpu_synchronize() || !v41_state_shrink(st, rcap)) return false;
++    bool ok = true;
++    v41_alloc_dense(st, rcap, rcap, &ok);
++    v41_alloc_attn_rows(st, rcap, &ok);
++    if (ok && !v41_state_plugins(st)) ok = false;
++    st->last_logit_row = 0;
++    return ok;
++}
++
+ /* ★收缩态克隆★(2026-10-09, 奖励回路同题多份采样): 同一提示的 G 份采样以前各自预填一遍(20 题 × 8 份 × ~1.0 s = 160 s, 其中 7/8 是重复算),
+  * 现在只预填一份, 收缩后把它的 KV 深拷给其余几份。预填是确定的(同提示两趟逐字节同, 10-06 门), 所以克隆出的 KV 与各自预填的逐字节同。
+  * 只认收缩态(稠密段 / logits 已放、图与反修表已放): 那时状态里剩的全是本请求自己的缓冲, 一个个深拷; 其余指针字段在收缩态里恒 NULL,
+diff --git a/src/core/core_v41_vision.c b/src/core/core_v41_vision.c
+index 04fefeb..3c2a3e6 100644
+--- a/src/core/core_v41_vision.c
++++ b/src/core/core_v41_vision.c
+@@ -78,6 +78,9 @@ static bool vis_run_images(ds4_engine *e, const v41_image *im, uint32_t n_img, v
+         ok = ds4_gpu_tensor_write(pat, 0, im[i].patches, (uint64_t)A[i].n * PP * 4) && vis_proj(A[i].x, w[8], w[9], PP, D, pat, A[i].n);
+     /* 32 块: 每块权重读一遍, 几张图依次过 */
+     for (uint32_t il = 0; ok && il < v->vis_layers; il++) {
++        /* Retire uploads before replacing reusable weight slots. Otherwise
++         * ordered staging copies can retain a whole tower's weights in flight. */
++        if (!ds4_gpu_synchronize()) { ok = false; break; }
+         const ds4_vision_block_weights *b = &V->blk[il];
+         ok = stage(vm, b->norm1, &w[0]) && stage(vm, b->qkv_w, &w[1]) && stage(vm, b->qkv_b, &w[2]) && stage(vm, b->o_w, &w[3]) &&
+              stage(vm, b->o_b, &w[4]) && stage(vm, b->norm2, &w[5]) && stage(vm, b->up_w, &w[6]) && stage(vm, b->down_w, &w[7]);
+@@ -97,6 +100,7 @@ static bool vis_run_images(ds4_engine *e, const v41_image *im, uint32_t n_img, v
+         }
+     }
+     /* norm → aligner(3×3 重排 → Linear → GELU → Linear) */
++    if (!ds4_gpu_synchronize()) ok = false;
+     if (ok) ok = stage(vm, V->out_norm, &w[0]) && stage(vm, V->mm0_w, &w[6]) && stage(vm, V->mm0_b, &w[2]) && stage(vm, V->mm1_w, &w[7]) && stage(vm, V->mm1_b, &w[4]);
+     for (uint32_t i = 0; ok && i < n_img; i++)
+         ok = ds4_gpu_v41_rms_norm_dev_tensor(xn, A[i].x, w[0], D, A[i].n, VIS_RMS_EPS) &&
+@@ -104,7 +108,7 @@ static bool vis_run_images(ds4_engine *e, const v41_image *im, uint32_t n_img, v
+              vis_proj(a1, w[6], w[2], (uint64_t)D * R * R, E, unf, A[i].n_llm) &&
+              ds4_gpu_v41_gelu_tensor(a1, (uint64_t)A[i].n_llm * E) &&
+              vis_proj(A[i].al, w[7], w[4], E, E, a1, A[i].n_llm);
+-    if (ok && !ds4_gpu_synchronize()) ok = false;
++    if (!ds4_gpu_synchronize()) ok = false;
+     ds4_gpu_tensor *scr[] = { pat, xn, qkv, o, gu, hm, unf, a1 };
+     free_list(scr, sizeof scr / sizeof scr[0]); free_list(w, sizeof w / sizeof w[0]);
+     for (uint32_t i = 0; i < n_img; i++) { if (A[i].x) ds4_gpu_tensor_free(A[i].x); A[i].x = NULL; }
+@@ -170,9 +174,16 @@ bool v41_vision_encode(ds4_engine *e, struct ds4_v41_images *imgs) {
+         if (ok && k != (uint64_t)im->row0 + im->n_tok) { fprintf(stderr, "ds4: 图片 span 行数账不平\n"); ok = false; }
+         if (ok) fprintf(stderr, "[v41] 图 %u: %ux%u patch → %ux%u token(span %u)\n", i, im->n_vit_h, im->n_vit_w, im->n_llm_h, im->n_llm_w, im->n_tok);
+     }
+-    for (uint32_t i = 0; i < imgs->n; i++) { if (A[i].al) ds4_gpu_tensor_free(A[i].al); free(imgs->img[i].patches); imgs->img[i].patches = NULL; }
++    if (!ds4_gpu_synchronize()) ok = false;
++    for (uint32_t i = 0; i < imgs->n; i++) {
++        if (A[i].al) ds4_gpu_tensor_free(A[i].al);
++        /* Adaptive prefill can retry an OOM with the same image request. Keep
++         * its input until encoding succeeds (or images_free cancels it). */
++        if (ok) { free(imgs->img[i].patches); imgs->img[i].patches = NULL; }
++    }
+     free(A);
+-    if (ok && !ds4_gpu_synchronize()) ok = false;
++    if (!ok && imgs->embd) { ds4_gpu_tensor_free(imgs->embd); imgs->embd = NULL; }
++    vis_drop_pages(vm);
+     imgs->encoded = ok ? 1 : 0;
+     return ok;
+ }
+@@ -221,7 +232,12 @@ void ds4_v41_images_free(struct ds4_v41_images *S) {
+     if (!S) return;
+     for (uint32_t i = 0; i < S->n; i++) free(S->img[i].patches);
+     free(S->img); free(S->row_of); free(S->sig_of);
+-    if (S->embd) ds4_gpu_tensor_free(S->embd);
++    if (S->embd) {
++        const uint64_t bytes = ds4_gpu_tensor_bytes(S->embd);
++        ds4_gpu_tensor_free(S->embd);
++        fprintf(stderr, "[v41] image cleanup: embeddings_freed=%.2f MiB metal_allocated=%.2f MiB\n",
++                (double)bytes / 1048576., (double)ds4_gpu_current_allocated_bytes() / 1048576.);
++    }
+     free(S);
+ }
+ 
+diff --git a/src/metal/metal_device.m b/src/metal/metal_device.m
+index 22c36a4..9d1de35 100644
+--- a/src/metal/metal_device.m
++++ b/src/metal/metal_device.m
+@@ -1,6 +1,10 @@
+ /* metal_device.m — ds4_metal.m 机械拆分产物(不改名/不改逻辑/不改字符串)。 */
+ #import "metal_internal.h"
+ 
++static uint64_t g_memory_oom_epoch;
++uint64_t ds4_gpu_memory_oom_epoch(void) { return g_memory_oom_epoch; }
++void ds4_gpu_note_memory_oom(void) { g_memory_oom_epoch++; }
++
+ void ds4_gpu_close_batch_encoder(void) {
+     if (!g_batch_enc) return;
+     [g_batch_enc endEncoding];
+@@ -10,10 +14,11 @@ void ds4_gpu_close_batch_encoder(void) {
+ int ds4_gpu_wait_command_buffer(id<MTLCommandBuffer> cb, const char *label) {
+     [cb waitUntilCompleted];
+     if (cb.status == MTLCommandBufferStatusError) {
++        if ([cb.error.domain isEqualToString:MTLCommandBufferErrorDomain] &&
++            cb.error.code == MTLCommandBufferErrorOutOfMemory) ds4_gpu_note_memory_oom();
+         fprintf(stderr, "ds4: Metal %s failed: %s\n",
+                 label, [[cb.error localizedDescription] UTF8String]);
+-        /* [diag] at the moment of failure, is the GPU working set over the
+-         * device ceiling? currentAllocated > recommendedMax => wired-set OOM. */
++        /* recommendedMax is a planning hint, not a hard allocation ceiling. */
+         fprintf(stderr,
+                 "ds4: [diag] CB '%s' failure: device currentAllocated %.2f GiB, "
+                 "recommendedMax %.2f GiB, residency wired %llu views\n",
+diff --git a/src/metal/metal_source.m b/src/metal/metal_source.m
+index a59cd72..410ea22 100644
+--- a/src/metal/metal_source.m
++++ b/src/metal/metal_source.m
+@@ -188,6 +188,7 @@ void ds4_gpu_set_quality(bool quality) {
+         @"metal/v41_dense.metal",
+         @"metal/v41_prefill_mm.metal",
+         @"metal/v41_layer.metal",
++        @"metal/v41_vision.metal",
+         @"metal/v41_attn.metal",
+         @"metal/v41_sample.metal",
+         @"metal/v41_vq.metal",
+diff --git a/src/metal/metal_tensor.m b/src/metal/metal_tensor.m
+index b041c4f..9e8e19e 100644
+--- a/src/metal/metal_tensor.m
++++ b/src/metal/metal_tensor.m
+@@ -10,6 +10,7 @@
+         tensor.buffer = [g_device newBufferWithLength:(NSUInteger)bytes
+                                               options:MTLResourceStorageModeShared];
+         if (!tensor.buffer) {
++            if (bytes <= g_device.maxBufferLength) ds4_gpu_note_memory_oom();
+             return NULL;
+         }
+         tensor.offset = 0;
+@@ -76,9 +77,11 @@ uint64_t ds4_gpu_tensor_bytes(const ds4_gpu_tensor *tensor) {
+ }
+ 
+ void *ds4_gpu_tensor_contents(ds4_gpu_tensor *tensor) {
+-    if (!tensor) return NULL;
+-    DS4MetalTensor *obj = ds4_gpu_tensor_obj(tensor);
+-    return (uint8_t *)[obj.buffer contents] + obj.offset;
++    @autoreleasepool {
++        if (!tensor) return NULL;
++        DS4MetalTensor *obj = ds4_gpu_tensor_obj(tensor);
++        return (uint8_t *)[obj.buffer contents] + obj.offset;
++    }
+ }
+ 
+ int ds4_gpu_tensor_fill_f32(ds4_gpu_tensor *tensor, float value, uint64_t count) {
+@@ -89,86 +92,108 @@ int ds4_gpu_tensor_fill_f32(ds4_gpu_tensor *tensor, float value, uint64_t count)
+     return 1;
+ }
+ 
++/* C worker threads have no outer autorelease pool. Buffer property getters
++ * may autorelease retained MTLBuffer references; drain them at each API call
++ * while command buffers / transient_buffers keep in-flight uploads alive. */
+ int ds4_gpu_tensor_write(ds4_gpu_tensor *tensor, uint64_t offset, const void *data, uint64_t bytes) {
+-    if (!tensor || (!data && bytes != 0)) return 0;
+-    DS4MetalTensor *obj = ds4_gpu_tensor_obj(tensor);
+-    if (offset > obj.bytes || bytes > obj.bytes - offset) return 0;
+-    if (bytes != 0) {
+-        memcpy((uint8_t *)[obj.buffer contents] + obj.offset + offset, data, (size_t)bytes);
++    @autoreleasepool {
++        if (!tensor || (!data && bytes != 0)) return 0;
++        DS4MetalTensor *obj = ds4_gpu_tensor_obj(tensor);
++        if (offset > obj.bytes || bytes > obj.bytes - offset) return 0;
++        if (bytes && (g_batch_cb || [g_pending_cbs count] != 0)) {
++            /* A host memcpy here can overwrite input of an earlier, unexecuted
++             * dispatch (notably V4.1's reused posg buffer during DSpark). Snapshot
++             * the upload and order its copy on the same GPU queue as the readers. */
++            ds4_gpu_tensor *upload = ds4_gpu_tensor_alloc(bytes);
++            if (!upload) return 0;
++            DS4MetalTensor *u = ds4_gpu_tensor_obj(upload);
++            memcpy([u.buffer contents], data, (size_t)bytes);
++            [g_transient_buffers addObject:u.buffer]; /* retain until queued work completes */
++            const int ok = ds4_gpu_tensor_copy(tensor, offset, upload, 0, bytes);
++            ds4_gpu_tensor_free(upload);
++            return ok;
++        }
++        if (bytes != 0) {
++            memcpy((uint8_t *)[obj.buffer contents] + obj.offset + offset, data, (size_t)bytes);
++        }
++        return 1;
+     }
+-    return 1;
+ }
+ 
+ int ds4_gpu_tensor_read(const ds4_gpu_tensor *tensor, uint64_t offset, void *data, uint64_t bytes) {
+-    if (!tensor || (!data && bytes != 0)) return 0;
+-    const DS4MetalTensor *obj = ds4_gpu_tensor_const_obj(tensor);
+-    if (offset > obj.bytes || bytes > obj.bytes - offset) return 0;
+-    /* Host-read boundary: async-submitted CBs (corr sidecar) may still be
+-     * writing this buffer. Reading GPU memory with in-flight writes is a
+-     * race — drain pending before the memcpy (no-op when the list is empty,
+-     * which is the steady decode state: end_commands already swept it). */
+-    if ([g_pending_cbs count] != 0)
+-        (void)ds4_gpu_wait_pending_command_buffers("tensor read");
+-    if (bytes != 0) {
+-        memcpy(data, (const uint8_t *)[obj.buffer contents] + obj.offset + offset, (size_t)bytes);
++    @autoreleasepool {
++        if (!tensor || (!data && bytes != 0)) return 0;
++        const DS4MetalTensor *obj = ds4_gpu_tensor_const_obj(tensor);
++        if (offset > obj.bytes || bytes > obj.bytes - offset) return 0;
++        /* Host-read boundary: async-submitted CBs (corr sidecar) may still be
++         * writing this buffer. Reading GPU memory with in-flight writes is a
++         * race — drain pending before the memcpy (no-op when the list is empty,
++         * which is the steady decode state: end_commands already swept it). */
++        if ([g_pending_cbs count] != 0)
++            if (!ds4_gpu_wait_pending_command_buffers("tensor read")) return 0;
++        if (bytes != 0) {
++            memcpy(data, (const uint8_t *)[obj.buffer contents] + obj.offset + offset, (size_t)bytes);
++        }
++        return 1;
+     }
+-    return 1;
+ }
+ 
+ int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset,
+                           const ds4_gpu_tensor *src, uint64_t src_offset,
+                           uint64_t bytes) {
+-    if (!dst || !src) return 0;
+-    if (!g_initialized && !ds4_gpu_init()) return 0;
+-    DS4MetalTensor *d = ds4_gpu_tensor_obj(dst);
+-    const DS4MetalTensor *s = ds4_gpu_tensor_const_obj(src);
+-    if (dst_offset > d.bytes || bytes > d.bytes - dst_offset) return 0;
+-    if (src_offset > s.bytes || bytes > s.bytes - src_offset) return 0;
+-    if (bytes == 0) return 1;
+-    if (!g_batch_cb) {
+-        /* 批外拷贝(2026-10-17): V4.1 草稿器推窗口在批外发, 以前这里恒失败 ⇒ DSpark 每步都废。
+-         * 与 v41_launch 批外同法: 自建命令缓冲异步提交, 同一队列保序。 */
+-        @autoreleasepool {
+-            id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+-            if (!cb) return 0;
+-            id<MTLBlitCommandEncoder> b2 = [cb blitCommandEncoder];
+-            if (!b2) return 0;
+-            [b2 copyFromBuffer:s.buffer sourceOffset:(NSUInteger)(s.offset + src_offset)
+-                      toBuffer:d.buffer destinationOffset:(NSUInteger)(d.offset + dst_offset) size:(NSUInteger)bytes];
+-            [b2 endEncoding];
+-            return ds4_gpu_submit_command_buffer_async(cb, 1);
++    @autoreleasepool {
++        if (!dst || !src) return 0;
++        if (!g_initialized && !ds4_gpu_init()) return 0;
++        DS4MetalTensor *d = ds4_gpu_tensor_obj(dst);
++        const DS4MetalTensor *s = ds4_gpu_tensor_const_obj(src);
++        if (dst_offset > d.bytes || bytes > d.bytes - dst_offset) return 0;
++        if (src_offset > s.bytes || bytes > s.bytes - src_offset) return 0;
++        if (bytes == 0) return 1;
++        if (!g_batch_cb) {
++            /* 批外拷贝(2026-10-17): V4.1 草稿器推窗口在批外发, 以前这里恒失败 ⇒ DSpark 每步都废。
++             * 与 v41_launch 批外同法: 自建命令缓冲异步提交, 同一队列保序。 */
++            @autoreleasepool {
++                id<MTLCommandBuffer> cb = [g_queue commandBuffer];
++                if (!cb) return 0;
++                id<MTLBlitCommandEncoder> b2 = [cb blitCommandEncoder];
++                if (!b2) return 0;
++                [b2 copyFromBuffer:s.buffer sourceOffset:(NSUInteger)(s.offset + src_offset)
++                          toBuffer:d.buffer destinationOffset:(NSUInteger)(d.offset + dst_offset) size:(NSUInteger)bytes];
++                [b2 endEncoding];
++                return ds4_gpu_submit_command_buffer_async(cb, 1);
++            }
+         }
+-    }
+ 
+-    {   /* 批内拷贝走计算核(2026-10-17 M5): blit 编码器要先关掉当前计算编码器, 一步里几十次拷贝 = 几十次编码器切换;
+-         * 4 B 对齐、不重叠时同一个计算编码器里一发核做完。值逐位同。 */
+-        const NSUInteger so = (NSUInteger)(s.offset + src_offset), dof = (NSUInteger)(d.offset + dst_offset);
+-        const int overlap = s.buffer == d.buffer && so < dof + bytes && dof < so + bytes;
+-        if (!overlap && (so % 4u) == 0 && (dof % 4u) == 0 && (bytes % 4u) == 0 && bytes / 4u <= 0xFFFFFFFFull) {
+-            id<MTLComputePipelineState> pso = ds4_gpu_get_pipeline("kernel_v41_copy_u32");
+-            if (pso) {
+-                const uint32_t n = (uint32_t)(bytes / 4u);
+-                id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(g_batch_cb);
+-                [enc setComputePipelineState:pso];
+-                [enc setBuffer:s.buffer offset:so atIndex:0];
+-                [enc setBuffer:d.buffer offset:dof atIndex:1];
+-                [enc setBytes:&n length:sizeof n atIndex:2];
+-                [enc dispatchThreadgroups:MTLSizeMake((n + 255u) / 256u, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+-                ds4_gpu_end_compute_encoder(g_batch_cb, enc);
+-                return 1;
++        {   /* 批内拷贝走计算核(2026-10-17 M5): blit 编码器要先关掉当前计算编码器, 一步里几十次拷贝 = 几十次编码器切换;
++             * 4 B 对齐、不重叠时同一个计算编码器里一发核做完。值逐位同。 */
++            const NSUInteger so = (NSUInteger)(s.offset + src_offset), dof = (NSUInteger)(d.offset + dst_offset);
++            const int overlap = s.buffer == d.buffer && so < dof + bytes && dof < so + bytes;
++            if (!overlap && (so % 4u) == 0 && (dof % 4u) == 0 && (bytes % 4u) == 0 && bytes / 4u <= 0xFFFFFFFFull) {
++                id<MTLComputePipelineState> pso = ds4_gpu_get_pipeline("kernel_v41_copy_u32");
++                if (pso) {
++                    const uint32_t n = (uint32_t)(bytes / 4u);
++                    id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(g_batch_cb);
++                    [enc setComputePipelineState:pso];
++                    [enc setBuffer:s.buffer offset:so atIndex:0];
++                    [enc setBuffer:d.buffer offset:dof atIndex:1];
++                    [enc setBytes:&n length:sizeof n atIndex:2];
++                    [enc dispatchThreadgroups:MTLSizeMake((n + 255u) / 256u, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
++                    ds4_gpu_end_compute_encoder(g_batch_cb, enc);
++                    return 1;
++                }
+             }
+         }
++        ds4_gpu_close_batch_encoder();
++        id<MTLBlitCommandEncoder> blit = [g_batch_cb blitCommandEncoder];
++        if (!blit) return 0;
++        [blit copyFromBuffer:s.buffer
++                sourceOffset:(NSUInteger)(s.offset + src_offset)
++                    toBuffer:d.buffer
++           destinationOffset:(NSUInteger)(d.offset + dst_offset)
++                        size:(NSUInteger)bytes];
++        [blit endEncoding];
++        return 1;
+     }
+-    ds4_gpu_close_batch_encoder();
+-    id<MTLBlitCommandEncoder> blit = [g_batch_cb blitCommandEncoder];
+-    if (!blit) return 0;
+-    [blit copyFromBuffer:s.buffer
+-            sourceOffset:(NSUInteger)(s.offset + src_offset)
+-                toBuffer:d.buffer
+-       destinationOffset:(NSUInteger)(d.offset + dst_offset)
+-                    size:(NSUInteger)bytes];
+-    [blit endEncoding];
+-    return 1;
+ }
+ 
+ int ds4_gpu_tensor_copy_f32_to_f16(ds4_gpu_tensor *dst, uint64_t dst_offset,
+diff --git a/src/metal/metal_v41_args.h b/src/metal/metal_v41_args.h
+index 75c3a20..e3e2509 100644
+--- a/src/metal/metal_v41_args.h
++++ b/src/metal/metal_v41_args.h
+@@ -18,12 +18,12 @@ typedef struct {
+ } v41_wgemm_args;
+ typedef struct { uint32_t M, N, K, lda, ldb, ldc, transA, transB; float alpha, beta; uint32_t a_gstride, b_gstride, c_gstride, pad1; } v41_sgemm_args;
+ typedef struct { uint32_t E, n_hc, n_rows, src_row0, slot, n_slot, dst_pos0, cap, has_posd, pad; } v41_hcmean_args;
+-typedef struct { uint32_t n_tok, n_expert, topk, pad; float route_scale; float pad1, pad2, pad3; } v41_router_args;
++typedef struct { uint32_t n_tok, n_expert, topk, has_vl; float route_scale; float pad1, pad2, pad3; } v41_router_args;
+ typedef struct { uint32_t ratio, dim, n, has_snap; } v41_cstep_args;
+ typedef struct { uint32_t n_head, head_dim, n_rot, osl, inverse, do_round; float theta, factor, beta_fast, beta_slow; } v41_rope_args;
+ typedef struct { uint32_t g0, dim, blk, row_bytes, nib_bytes, nb_row, mode, has_posd, ratio, g_trash, nbatch, pad; } v41_kvpack_args;
+ typedef struct { uint32_t pos0, i0, window, hd, back, has_posd, pad0, pad1; } v41_ring_args;
+-typedef struct { uint32_t pos0, window, ng, topk, n_head, hd, full_block, ring, win_lo, has_posd, has_comp, pad; float scale; float pad1, pad2, pad3; } v41_attn_args;
++typedef struct { uint32_t pos0, window, ng, topk, n_head, hd, full_block, ring, win_lo, has_posd, has_comp, pad; float scale; uint32_t ratio; float pad2, pad3; } v41_attn_args;
+ typedef struct { uint32_t pos0, ng, n_head, dk, ratio, has_posd, has_cand, cand_bs, cand_cap, n_rows, topk, pad; } v41_idx_args;
+ typedef struct { uint32_t pos0, ng, ratio, topk_blocks, bs, has_posd, n_rows, nb_cap; } v41_cand_args;
+ typedef struct { uint64_t seed; uint32_t V, row0, n_rows, top_k, stream, has_q; float inv_T, min_p, top_p; uint32_t pad0, pad1, pad2; } v41_sample_args;
+diff --git a/src/metal/metal_v41_attn.m b/src/metal/metal_v41_attn.m
+index b4279a7..fef49bf 100644
+--- a/src/metal/metal_v41_attn.m
++++ b/src/metal/metal_v41_attn.m
+@@ -8,7 +8,7 @@ int ds4_gpu_v41_sparse_attn_tensor(ds4_gpu_tensor *o, const ds4_gpu_tensor *q, c
+                                    const void *model_map, uint64_t model_size, uint64_t sink_offset, uint32_t n_tok, uint32_t pos0, uint32_t window, uint32_t ng,
+                                    uint32_t topk, uint32_t ratio, uint32_t n_head, uint32_t head_dim, float scale, int full_block, int ring, uint32_t win_lo,
+                                    const ds4_gpu_tensor *posd, uint32_t pos_cap) {
+-    (void)ratio; (void)pos_cap;
++    (void)pos_cap;
+     if (!o || !q || !kv_win || head_dim != 512u || (n_head % 8u) || n_tok == 0) { fprintf(stderr, "ds4: [v41-metal] sparse attn 只实现 head_dim 512、头数 8 的倍数\n"); return 0; }
+     if (!full_block && !ring) { fprintf(stderr, "ds4: [v41-metal] sparse attn: 主路窗口必须是环(decode.md D1)\n"); return 0; }
+     if (ds4_gpu_tensor_bytes(kv_win) < (uint64_t)(window + n_tok) * head_dim * 4) { fprintf(stderr, "ds4: [v41-metal] 窗口缓冲不够 %u+%u 行\n", window, n_tok); return 0; }
+@@ -17,7 +17,7 @@ int ds4_gpu_v41_sparse_attn_tensor(ds4_gpu_tensor *o, const ds4_gpu_tensor *q, c
+     if (!sb) return 0;
+     const int hasc = kv_comp && idx;
+     v41_attn_args a = { pos0, window, hasc ? ng : 0u, hasc ? topk : 0u, n_head, head_dim, full_block ? n_tok : 0u, ring ? 1u : 0u, win_lo, posd ? 1u : 0u, hasc ? 1u : 0u, 0,
+-                        scale, 0, 0, 0 };
++                        scale, g_v41_half_prefill ? ratio : 0u, 0, 0 }; /* training may supply frozen/noncausal index fixtures */
+     /* ★解码小批分段(2026-10-17 M5)★: n ≤ 8 时原核一 threadgroup 串行扫全部键, 长上下文下 GPU 只开 n×8 个 threadgroup。
+      * 键按 V41_ATTN_SPLIT_KEYS 一段分到 grid.z(最多 V41_ATTN_SPLIT_MAX 段), 再由 reduce 核合并(在线 softmax 的 max/sum 合法合并)。
+      * 段数按实际可见键数估(主机知道位置时: 窗口里可见行 + 实际可选压缩组); 设备位置(posd)时只能按上限。
+@@ -32,7 +32,10 @@ int ds4_gpu_v41_sparse_attn_tensor(ds4_gpu_tensor *o, const ds4_gpu_tensor *q, c
+     }
+     uint32_t S = (uint32_t)((kmax + V41_ATTN_SPLIT_KEYS - 1u) / V41_ATTN_SPLIT_KEYS);
+     if (S > V41_ATTN_SPLIT_MAX) S = V41_ATTN_SPLIT_MAX;
+-    if (n_tok <= DS4_V41_GEMV_MAX_TOK && S > 1u) {
++    /* Causal rows also use this kernel for S=1. A batch can straddle S=1/2;
++     * choosing a different kernel for the same row breaks greedy parity. */
++    if (n_tok <= DS4_V41_GEMV_MAX_TOK && (S > 1u || !full_block)) {
++        if (!S) S = 1u;
+         static v41_scratch g_attn_part;
+         id<MTLBuffer> pb = v41_grow(&g_attn_part, (uint64_t)n_tok * n_head * S * (head_dim + 2u) * 4u, "v41 attn split");
+         if (pb) {
+diff --git a/src/metal/metal_v41_common.m b/src/metal/metal_v41_common.m
+index 6f4263a..d47e499 100644
+--- a/src/metal/metal_v41_common.m
++++ b/src/metal/metal_v41_common.m
+@@ -18,7 +18,10 @@
+     if (!g_initialized && !ds4_gpu_init()) return nil;
+     /* 旧缓冲可能还被在飞的命令缓冲引用: Metal 按引用计数保活到命令完成, 这里直接放手即可 */
+     id<MTLBuffer> nb = [g_device newBufferWithLength:(NSUInteger)(bytes ? bytes : 16) options:MTLResourceStorageModeShared];
+-    if (!nb) { fprintf(stderr, "ds4: [v41-metal] %s 暂存分配失败 (%.1f MB)\n", what, (double)bytes / 1048576.0); return nil; }
++    if (!nb) {
++        if (bytes <= g_device.maxBufferLength) ds4_gpu_note_memory_oom();
++        fprintf(stderr, "ds4: [v41-metal] %s 暂存分配失败 (%.1f MB)\n", what, (double)bytes / 1048576.0); return nil;
++    }
+     s->buf = nb; s->cap = bytes; s->what = what;
+     g_v41_gen++;
+     uint32_t i = 0;
+diff --git a/src/metal/metal_v41_dense.m b/src/metal/metal_v41_dense.m
+index b5a791a..b7e5d66 100644
+--- a/src/metal/metal_v41_dense.m
++++ b/src/metal/metal_v41_dense.m
+@@ -41,17 +41,11 @@ int v41_gemv(const void *model_map, uint64_t model_size, uint32_t wtype, uint64_
+     a.sc_gstride = wtype == V41_WT_FP8BLK ? (uint64_t)((out_dim + 31u) / 32u) * a.sbc : 0;
+     a.in_dim = (uint32_t)in_dim; a.out_dim = (uint32_t)out_dim; a.x_stride = x_stride; a.out_stride = out_stride; a.ksplit = ksplit;
+     a.x_gstride = x_gstride; a.out_gstride = out_gstride; a.n_tok = n_tok; a.round_out = round_out ? 1u : 0u; a.wtype = wtype; a.has_skip = skip ? 1u : 0u;
+-    /* q4_K、n_tok == 1: llama.cpp kernel_mul_mv_q4_K_f32 移植核(f32 激活, 只差加法次序; M5 解码 33.7 → 38 tok/s 的一半来自这里) */
+-    if (wtype == V41_WT_Q4K && n_tok == 1u && (out_dim % 4u) == 0u && (in_dim % 256u) == 0u) {
++    /* Single-row and DSpark verification must use identical accumulation order.
++     * The token dimension is independent; each grid.z row runs the decode kernel. */
++    if (wtype == V41_WT_Q4K && (out_dim % 4u) == 0u && (in_dim % 256u) == 0u) {
+         v41_bind bq[] = { V41_A(a), V41_B(wb, 0), V41_T(x), V41_T(out), V41_T(skip) };
+-        return v41_launch("kernel_v41_gemv_q4k_ll", bq, 5, MTLSizeMake((NSUInteger)(out_dim / 4u), n_groups, 1), MTLSizeMake(64, 1, 1));
+-    }
+-    /* q4_K、2 ≤ n_tok ≤ 8(投机验证批): 8 行同块广播 x + 权重整解一次的核(f32 激活) */
+-    if (wtype == V41_WT_Q4K && n_tok >= 2u && (out_dim % 8u) == 0u && (in_dim % 256u) == 0u && (x_stride % 4u) == 0u &&
+-        (x_gstride % 4u) == 0u && (ds4_gpu_tensor_offset(x) % 16u) == 0u) {
+-        char qn[40]; snprintf(qn, sizeof qn, "kernel_v41_gemv_q4k_w%u", n_tok);
+-        v41_bind bq[] = { V41_A(a), V41_B(wb, 0), V41_T(x), V41_T(out), V41_T(skip) };
+-        return v41_launch(qn, bq, 5, MTLSizeMake((NSUInteger)(out_dim / 8u), n_groups, 1), MTLSizeMake(128, 1, 1));
++        return v41_launch("kernel_v41_gemv_q4k_ll", bq, 5, MTLSizeMake((NSUInteger)(out_dim / 4u), n_groups, n_tok), MTLSizeMake(64, 1, 1));
+     }
+     char name[48]; snprintf(name, sizeof name, "kernel_v41_gemv_nt%u", n_tok);
+     const uint32_t rpb = 8u / ksplit;
+diff --git a/src/metal/metal_v41_layer.m b/src/metal/metal_v41_layer.m
+index abe24ac..7af835d 100644
+--- a/src/metal/metal_v41_layer.m
++++ b/src/metal/metal_v41_layer.m
+@@ -112,15 +112,15 @@ int ds4_gpu_v41_router_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weights,
+                               uint64_t bias_offset, const ds4_gpu_tensor *bias_vl, const ds4_gpu_tensor *vl_rows,
+                               uint32_t n_tok, uint32_t n_expert, uint32_t topk, float route_scale) {
+     if (!selected || !weights || !logits || topk > 16u || n_expert > 32u * 12u || n_tok == 0) return 0;
+-    /* 图片位置的 bias_vl(2026-10-13)Metal 还没接: 视觉塔本身在 Metal 也还是桩(metal_v41_vision.m), 图片请求到不了这里; 到了就明说失败, 不拿文本偏置充数 */
+-    if (bias_vl && vl_rows) { fprintf(stderr, "ds4: Metal V4.1 路由还没有图片位置的 bias_vl\n"); return 0; }
++    const uint32_t has_vl = bias_vl && vl_rows;
++    if (has_vl && (ds4_gpu_tensor_bytes(bias_vl) < (uint64_t)n_expert * 4 || ds4_gpu_tensor_bytes(vl_rows) < (uint64_t)n_tok * 4)) return 0;
+     uint64_t bo = 0;
+     id<MTLBuffer> bb = v41_model_buf(model_map, model_size, bias_offset, (uint64_t)n_expert * 4, &bo, "v41 gate bias");
+     if (!bb) return 0;
+     for (uint32_t i = 0; i < g_v41_rb_n; i++) if (g_v41_rb[i].off == bias_offset && g_v41_rb[i].n == n_expert) { bb = g_v41_rb[i].dev; bo = 0; break; }
+-    v41_router_args a = { n_tok, n_expert, topk, 0, route_scale, 0, 0, 0 };
+-    v41_bind b[] = { V41_A(a), V41_T(selected), V41_T(weights), V41_T(logits), V41_B(bb, (NSUInteger)bo) };
+-    return v41_launch("kernel_v41_router", b, 5, MTLSizeMake((n_tok + 7u) / 8u, 1, 1), MTLSizeMake(256, 1, 1));
++    v41_router_args a = { n_tok, n_expert, topk, has_vl, route_scale, 0, 0, 0 };
++    v41_bind b[] = { V41_A(a), V41_T(selected), V41_T(weights), V41_T(logits), V41_B(bb, (NSUInteger)bo), V41_T(bias_vl), V41_T(vl_rows) };
++    return v41_launch("kernel_v41_router", b, 7, MTLSizeMake((n_tok + 7u) / 8u, 1, 1), MTLSizeMake(256, 1, 1));
+ }
+ int ds4_gpu_v41_swiglu_tensor(ds4_gpu_tensor *h, const ds4_gpu_tensor *gate, const ds4_gpu_tensor *up, uint32_t n_tok, uint32_t mid, float limit) {
+     if (!h || !gate || !up) return 0;
+diff --git a/src/metal/metal_v41_vision.m b/src/metal/metal_v41_vision.m
+index e0a96f7..23282cc 100644
+--- a/src/metal/metal_v41_vision.m
++++ b/src/metal/metal_v41_vision.m
+@@ -1,53 +1,115 @@
+-/* metal_v41_vision.m — 视觉塔原语在 Metal 侧的落点(2026-10-13)。契约 ds4_gpu_v41.h "视觉塔" 一节。
+- *
+- * ★现状 = 诚实的桩, 全部返回 0(失败)★。CUDA(src/cuda/cuda_v41_vision.inc.cu)是部署路; 16 GB 的 Mac 装不下 V4.1 Flash,
+- * 这里没有真机可以过门, 所以不写"看起来能跑"的实现 —— 视觉塔算错不报错, 只会让模型看图胡说。
+- * 行为: 带图片的请求在 Metal 上到 v41_vision_encode 第一发就失败, core 报"视觉塔在这个后端没有实现", 不会静默丢图。
+- * 要补齐时: bias/rope/swiglu_pair/gelu/unfold/row_select/rows_zero 都是逐元素核(照 metal/v41_dense.metal 的写法),
+- * dense_attn 可以借 metal/flash_attn_ext.metal 的无掩码路; 门同 CUDA: tools/vision_golden.py 的金标逐行 cos。 */
++/* Metal vision primitives. BF16 boundaries match cuda_v41_vision. Weights
++ * are request-local tensors; they never enter the registered model mapping. */
+ #import "metal_v41.h"
+ 
+-static int v41_vision_unimplemented(const char *what) {
+-    fprintf(stderr, "ds4: Metal 视觉塔原语 %s 还没有实现(CUDA 是部署路)\n", what);
+-    return 0;
++static int vis_has(const ds4_gpu_tensor *t, uint64_t n, uint32_t bytes) {
++    return t && n && n <= UINT32_MAX && ds4_gpu_tensor_bytes(t) / bytes >= n;
+ }
+ int ds4_gpu_v41_bias_add_dev_tensor(ds4_gpu_tensor *x, const ds4_gpu_tensor *bias, uint32_t n_tok, uint32_t dim) {
+-    (void)x; (void)bias; (void)n_tok; (void)dim;
+-    return v41_vision_unimplemented("bias_add");
++    const uint64_t n = (uint64_t)n_tok * dim;
++    if (!vis_has(x, n, 4) || !vis_has(bias, dim, 4)) return 0;
++    v41_n_args a = { (uint32_t)n, dim, 0, 0, 0, 0, 0, 0 };
++    v41_bind b[] = { V41_A(a), V41_T(x), V41_T(bias) };
++    return v41_launch_1d("kernel_v41_vis_bias", b, 3, n);
+ }
+-int ds4_gpu_v41_matmul_bf16_dev_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *W, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint32_t n_tok) {
+-    (void)out; (void)W; (void)in_dim; (void)out_dim; (void)x; (void)n_tok;
+-    return v41_vision_unimplemented("matmul_bf16_dev");
++int ds4_gpu_v41_matmul_bf16_dev_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *W, uint64_t in_dim, uint64_t out_dim,
++                                      const ds4_gpu_tensor *x, uint32_t n_tok) {
++    if (!in_dim || !out_dim || in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
++        !vis_has(W, in_dim * out_dim, 2) || !vis_has(x, (uint64_t)n_tok * in_dim, 4) ||
++        !vis_has(out, (uint64_t)n_tok * out_dim, 4)) return 0;
++    /* Float SIMD matrices preserve BF16's full range. vis_proj adds bias
++     * before rounding; rounding here would change the official Linear. */
++    v41_wgemm_args a = {0};
++    a.M = n_tok; a.N = (uint32_t)out_dim; a.K = (uint32_t)in_dim;
++    a.lda = a.K; a.ldc = a.N; a.wcols = a.K; a.wtype = V41_WT_BF16;
++    v41_bind b[] = { V41_A(a), V41_T(W), V41_T(x), V41_T(out), V41_T(W) };
++    return v41_launch(a.K % 8u ? "kernel_v41_vis_wgemm" : "kernel_v41_wgemm", b, 5,
++                      MTLSizeMake((a.N + 63u) / 64u, (a.M + 63u) / 64u, 1), MTLSizeMake(128, 1, 1));
+ }
+ int ds4_gpu_v41_rms_norm_dev_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, const ds4_gpu_tensor *w, uint32_t dim, uint32_t n_tok, float eps) {
+-    (void)out; (void)x; (void)w; (void)dim; (void)n_tok; (void)eps;
+-    return v41_vision_unimplemented("rms_norm_dev");
++    if (!vis_has(out, (uint64_t)n_tok * dim, 4) || !vis_has(x, (uint64_t)n_tok * dim, 4) || !vis_has(w, dim, 4) || !(eps > 0)) return 0;
++    v41_n_args a = { dim, 0, 0, 0, eps, 0, 0, 0 }; uint64_t off = 0;
++    v41_bind b[] = { V41_A(a), V41_T(out), V41_T(x), V41_T(w), V41_A(off) };
++    return v41_launch("kernel_v41_rms_norm", b, 5, MTLSizeMake(n_tok, 1, 1), MTLSizeMake(256, 1, 1));
+ }
+ int ds4_gpu_v41_vision_rope_tensor(ds4_gpu_tensor *qkv, uint32_t n_tok, uint32_t n_w, uint32_t n_head, uint32_t head_dim, float theta) {
+-    (void)qkv; (void)n_tok; (void)n_w; (void)n_head; (void)head_dim; (void)theta;
+-    return v41_vision_unimplemented("vision_rope");
++    if (!n_w || !n_head || !head_dim || head_dim % 4u || !(theta > 0) ||
++        !vis_has(qkv, (uint64_t)n_tok * 3u * n_head * head_dim, 4)) return 0;
++    v41_n_args a = { n_tok, n_w, n_head, head_dim, theta, 0, 0, 0 };
++    v41_bind b[] = { V41_A(a), V41_T(qkv) };
++    return v41_launch_1d("kernel_v41_vis_rope", b, 2, (uint64_t)n_tok * n_head * (head_dim / 2u));
+ }
++/* S and BF16-rounded P share one float buffer, bounded to 96 MiB. Query
++ * chunks still attend to ALL keys. Scratch is drained/freed even on failure. */
+ int ds4_gpu_v41_dense_attn_tensor(ds4_gpu_tensor *o, const ds4_gpu_tensor *qkv, uint32_t n_tok, uint32_t n_head, uint32_t head_dim) {
+-    (void)o; (void)qkv; (void)n_tok; (void)n_head; (void)head_dim;
+-    return v41_vision_unimplemented("dense_attn");
++    const uint64_t hd64 = (uint64_t)n_head * head_dim;
++    if (!hd64 || hd64 > UINT32_MAX / 3u || !vis_has(o, (uint64_t)n_tok * hd64, 4) ||
++        !vis_has(qkv, (uint64_t)n_tok * 3u * hd64, 4)) return 0;
++    @autoreleasepool {
++        const uint32_t hd = (uint32_t)hd64, stride = 3u * hd;
++        const uint64_t row_bytes = (uint64_t)n_head * n_tok * 4u, cap = 96ull << 20;
++        if (row_bytes > cap) return 0;
++        uint32_t qc = (uint32_t)(cap / row_bytes);
++        if (qc > 256u) qc = 256u;
++        if (qc >= 64u) qc &= ~63u;
++        if (qc > n_tok) qc = n_tok;
++        ds4_gpu_tensor *p = ds4_gpu_tensor_alloc(row_bytes * qc);
++        if (!p) return 0;
++        int ok = 1;
++        for (uint32_t q0 = 0; ok && q0 < n_tok; q0 += qc) {
++            const uint32_t nq = MIN(qc, n_tok - q0);
++            v41_sgemm_args a = {0};
++            a.M = nq; a.N = n_tok; a.K = head_dim; a.lda = stride; a.ldb = stride; a.ldc = n_tok;
++            a.transB = 1; a.alpha = 1; a.a_gstride = head_dim; a.b_gstride = head_dim; a.c_gstride = nq * n_tok;
++            v41_bind bq[] = { V41_A(a), V41_TO(qkv, (uint64_t)q0 * stride * 4), V41_TO(qkv, (uint64_t)hd * 4), V41_T(p) };
++            ok = v41_launch("kernel_v41_sgemm", bq, 4, MTLSizeMake((n_tok + 63u) / 64u, (nq + 63u) / 64u, n_head), MTLSizeMake(128, 1, 1));
++            v41_n_args sa = { n_tok, 0, 0, 0, 1.0f / sqrtf((float)head_dim), 0, 0, 0 };
++            v41_bind bs[] = { V41_A(sa), V41_T(p) };
++            if (ok) ok = v41_launch("kernel_v41_vis_softmax", bs, 2, MTLSizeMake(n_head * nq, 1, 1), MTLSizeMake(256, 1, 1));
++            a.M = nq; a.N = head_dim; a.K = n_tok; a.lda = n_tok; a.ldb = stride; a.ldc = hd;
++            a.transB = 0; a.a_gstride = nq * n_tok; a.b_gstride = head_dim; a.c_gstride = head_dim;
++            v41_bind bv[] = { V41_A(a), V41_T(p), V41_TO(qkv, (uint64_t)2 * hd * 4), V41_TO(o, (uint64_t)q0 * hd * 4) };
++            if (ok) ok = v41_launch("kernel_v41_sgemm", bv, 4, MTLSizeMake((head_dim + 63u) / 64u, (nq + 63u) / 64u, n_head), MTLSizeMake(128, 1, 1));
++        }
++        if (ok) ok = ds4_gpu_v41_round_bf16_tensor(o, (uint64_t)n_tok * hd);
++        if (!v41_host_sync()) ok = 0;
++        ds4_gpu_tensor_free(p);
++        return ok;
++    }
+ }
+ int ds4_gpu_v41_swiglu_pair_tensor(ds4_gpu_tensor *h, const ds4_gpu_tensor *gu, uint32_t n_tok, uint32_t mid) {
+-    (void)h; (void)gu; (void)n_tok; (void)mid;
+-    return v41_vision_unimplemented("swiglu_pair");
++    const uint64_t n = (uint64_t)n_tok * mid;
++    if (!vis_has(h, n, 4) || !vis_has(gu, n * 2, 4)) return 0;
++    v41_n_args a = { (uint32_t)n, mid, 0, 0, 0, 0, 0, 0 };
++    v41_bind b[] = { V41_A(a), V41_T(h), V41_T(gu) };
++    return v41_launch_1d("kernel_v41_vis_swiglu", b, 3, n);
+ }
+ int ds4_gpu_v41_gelu_tensor(ds4_gpu_tensor *x, uint64_t n) {
+-    (void)x; (void)n;
+-    return v41_vision_unimplemented("gelu");
++    if (!vis_has(x, n, 4)) return 0;
++    v41_bind b[] = { V41_T(x), V41_A(n) };
++    return v41_launch_1d("kernel_v41_vis_gelu", b, 2, n);
+ }
+ int ds4_gpu_v41_vision_unfold_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, uint32_t n_h, uint32_t n_w, uint32_t dim, uint32_t r) {
+-    (void)out; (void)x; (void)n_h; (void)n_w; (void)dim; (void)r;
+-    return v41_vision_unimplemented("vision_unfold");
++    if (!n_h || !n_w || !dim || !r || r > 64u || n_h > UINT32_MAX - r || n_w > UINT32_MAX - r) return 0;
++    const uint64_t n = (uint64_t)((n_h + r - 1u) / r) * ((n_w + r - 1u) / r) * dim * r * r;
++    if (!vis_has(out, n, 4) || !vis_has(x, (uint64_t)n_h * n_w * dim, 4)) return 0;
++    v41_n_args a = { n_h, n_w, dim, r, 0, 0, 0, 0 };
++    v41_bind b[] = { V41_A(a), V41_T(out), V41_T(x), V41_A(n) };
++    return v41_launch_1d("kernel_v41_vis_unfold", b, 4, n);
+ }
+ int ds4_gpu_v41_row_select_tensor(ds4_gpu_tensor *x, const ds4_gpu_tensor *src, const ds4_gpu_tensor *rows, uint32_t n_tok, uint32_t dim) {
+-    (void)x; (void)src; (void)rows; (void)n_tok; (void)dim;
+-    return v41_vision_unimplemented("row_select");
++    const uint64_t n = (uint64_t)n_tok * dim;
++    if (!vis_has(x, n, 4) || !vis_has(rows, n_tok, 4) || !vis_has(src, dim, 4)) return 0;
++    const uint64_t src_rows = ds4_gpu_tensor_bytes(src) / ((uint64_t)dim * 4);
++    if (src_rows > UINT32_MAX) return 0;
++    v41_n_args a = { (uint32_t)n, dim, (uint32_t)src_rows, 0, 0, 0, 0, 0 };
++    v41_bind b[] = { V41_A(a), V41_T(x), V41_T(src), V41_T(rows) };
++    return v41_launch_1d("kernel_v41_vis_select", b, 4, n);
+ }
+ int ds4_gpu_v41_rows_zero_tensor(ds4_gpu_tensor *x, const ds4_gpu_tensor *rows, uint32_t n_tok, uint32_t dim) {
+-    (void)x; (void)rows; (void)n_tok; (void)dim;
+-    return v41_vision_unimplemented("rows_zero");
++    const uint64_t n = (uint64_t)n_tok * dim;
++    if (!vis_has(x, n, 4) || !vis_has(rows, n_tok, 4)) return 0;
++    v41_n_args a = { (uint32_t)n, dim, 0, 0, 0, 0, 0, 0 };
++    v41_bind b[] = { V41_A(a), V41_T(x), V41_T(rows) };
++    return v41_launch_1d("kernel_v41_vis_zero", b, 3, n);
+ }
+diff --git a/tests/t_metal_v41_attn.c b/tests/t_metal_v41_attn.c
+index 9c85c46..6d4d733 100644
+--- a/tests/t_metal_v41_attn.c
++++ b/tests/t_metal_v41_attn.c
+@@ -25,7 +25,9 @@ static void test_attention(void) {
+     TEST_ASSERT(ds4_gpu_v41_ckv_pack_tensor(tc, 0, trow, NG, NULL, 0, 0, 0) != 0);
+     uint8_t *cache = malloc((size_t)NG * DS4_V41_CKV_BYTES);
+     TEST_ASSERT(test_v41_read(tc, cache, (uint64_t)NG * DS4_V41_CKV_BYTES));
+-    TEST_ASSERT(ds4_gpu_v41_sparse_attn_tensor(to, tq, tw, tc, tidx, test_v41_model_map(), test_v41_model_size(), o_sink, N, pos0, W, NG, TOPK, 4, NH, HD, scale, 0, 1, 0, NULL, 0) != 0);
++    /* Arbitrary preselected keys, including future IDs: ratio=0 disables the
++     * causal compression-group bound for this softmax-only fixture. */
++    TEST_ASSERT(ds4_gpu_v41_sparse_attn_tensor(to, tq, tw, tc, tidx, test_v41_model_map(), test_v41_model_size(), o_sink, N, pos0, W, NG, TOPK, 0, NH, HD, scale, 0, 1, 0, NULL, 0) != 0);
+     float *got = malloc((size_t)N * NH * HD * 4), *ref = malloc((size_t)N * NH * HD * 4), *keys = malloc((size_t)(W + TOPK) * HD * 4), *s = malloc((W + TOPK) * 4);
+     TEST_ASSERT(test_v41_read(to, got, (size_t)N * NH * HD * 4));
+     for (uint32_t i = 0; i < N; i++) {
+@@ -152,11 +154,59 @@ static void test_sampler(void) {
+     fprintf(stderr, "ds4: [v41-test] sampler 投机结构: %u/%u\n", spec_ok, R - 1); TEST_ASSERT(spec_ok == R - 1);
+     ds4_gpu_tensor_free(tl); ds4_gpu_tensor_free(tp); ds4_gpu_tensor_free(tt); ds4_gpu_tensor_free(to); free(lg); free(pos); free(tok);
+ }
++/* A causal verification row must see the same keys and reduction order as a
++ * single decode step, even across split and compression-group boundaries. */
++static void test_attention_batch_parity(void) {
++    TEST_ASSERT(ds4_gpu_v41_set_half_prefill(1));
++    const uint32_t N = 6, W = 128, H = 8, D = 512, positions[] = { 27, 60, 125, 8191 };
++    TEST_ASSERT(test_v41_model_begin(4096));
++    const uint64_t sink = test_v41_model_alloc(H * 4);
++    memset(test_v41_model_ptr(sink), 0, H * 4);
++    TEST_ASSERT(test_v41_map());
++    for (uint32_t c = 0; c < 4; c++) for (uint32_t ratio = 4; ratio <= 128; ratio *= 32) {
++        const uint32_t p = positions[c], ng = (p + N) / ratio, topk = ng < 512 ? ng : 512;
++        float *q = malloc((size_t)N * H * D * 4), *win = malloc((size_t)(W + N) * D * 4);
++        float *rows = malloc((size_t)(ng + 1) * D * 4), *onewin = malloc((size_t)(W + 1) * D * 4);
++        float *batch = malloc((size_t)N * H * D * 4), *single = malloc((size_t)N * H * D * 4);
++        int32_t *idx = malloc((size_t)N * (topk + 1) * 4);
++        test_v41_fill_bf16(q, (uint64_t)N * H * D, .5f);
++        test_v41_fill_bf16(win, (uint64_t)(W + N) * D, .5f);
++        test_v41_fill_bf16(rows, (uint64_t)(ng + 1) * D, .5f);
++        for (uint32_t t = 0; t < N; t++) for (uint32_t j = 0; j < topk; j++) idx[t * topk + j] = j < (p + t + 1) / ratio ? (int32_t)j : -1;
++        ds4_gpu_tensor *tq = test_v41_tensor(q, (uint64_t)N * H * D * 4), *tw = test_v41_tensor(win, (uint64_t)(W + N) * D * 4);
++        ds4_gpu_tensor *tr = test_v41_tensor(rows, (uint64_t)(ng + 1) * D * 4), *tc = test_v41_tensor(NULL, (uint64_t)(ng + 1) * DS4_V41_CKV_BYTES);
++        ds4_gpu_tensor *ti = test_v41_tensor(idx, (uint64_t)N * (topk + 1) * 4), *to = test_v41_tensor(NULL, (uint64_t)N * H * D * 4);
++        if (ng) TEST_ASSERT(ds4_gpu_v41_ckv_pack_tensor(tc, 0, tr, ng, NULL, 0, 0, 0));
++        TEST_ASSERT(ds4_gpu_v41_sparse_attn_tensor(to, tq, tw, ng ? tc : NULL, ng ? ti : NULL, test_v41_model_map(), test_v41_model_size(), sink,
++                    N, p, W, ng, topk, ratio, H, D, .0442f, 0, 1, 0, NULL, 0));
++        TEST_ASSERT(test_v41_read(to, batch, (uint64_t)N * H * D * 4));
++        memcpy(onewin, win, (size_t)W * D * 4);
++        for (uint32_t t = 0; t < N; t++) {
++            const uint32_t vis = (p + t + 1) / ratio, tk = vis < topk ? vis : topk;
++            memcpy(onewin + W * D, win + (W + t) * D, D * 4);
++            ds4_gpu_tensor *sq = test_v41_tensor(q + (uint64_t)t * H * D, (uint64_t)H * D * 4);
++            ds4_gpu_tensor *sw = test_v41_tensor(onewin, (uint64_t)(W + 1) * D * 4);
++            ds4_gpu_tensor *si = test_v41_tensor(idx + t * topk, (uint64_t)(tk ? tk : 1) * 4);
++            TEST_ASSERT(ds4_gpu_v41_sparse_attn_tensor(to, sq, sw, vis ? tc : NULL, vis ? si : NULL, test_v41_model_map(), test_v41_model_size(), sink,
++                        1, p + t, W, vis, tk, ratio, H, D, .0442f, 0, 1, 0, NULL, 0));
++            TEST_ASSERT(test_v41_read(to, single + (uint64_t)t * H * D, (uint64_t)H * D * 4));
++            memcpy(onewin + ((p + t) % W) * D, win + (W + t) * D, D * 4);
++            ds4_gpu_tensor_free(sq); ds4_gpu_tensor_free(sw); ds4_gpu_tensor_free(si);
++        }
++        char label[80]; snprintf(label, sizeof label, "attention batch parity pos=%u ratio=%u", p, ratio);
++        test_v41_cmp(label, batch, single, (uint64_t)N * H * D, 0.f, 0.f);
++        ds4_gpu_tensor_free(tq); ds4_gpu_tensor_free(tw); ds4_gpu_tensor_free(tr); ds4_gpu_tensor_free(tc); ds4_gpu_tensor_free(ti); ds4_gpu_tensor_free(to);
++        free(q); free(win); free(rows); free(onewin); free(batch); free(single); free(idx);
++    }
++    TEST_ASSERT(ds4_gpu_v41_set_half_prefill(0));
++}
++
+ void test_metal_v41_attn(void) {
+     test_v41_seed(0x61);
+     test_attention();
+     test_indexer();
+     test_sampler();
++    test_attention_batch_parity();
+ }
+ #else
+ typedef int ds4_t_metal_v41_attn_nonempty_tu;
+diff --git a/tests/t_metal_v41_dense.c b/tests/t_metal_v41_dense.c
+index d7ef0df..67e3652 100644
+--- a/tests/t_metal_v41_dense.c
++++ b/tests/t_metal_v41_dense.c
+@@ -189,12 +189,51 @@ static void test_embed_colnorm(void) {
+     }
+ }
+ 
++/* Greedy DSpark verifies several rows at once. Each row must match the same
++ * production matmul dispatched alone, including grouped strides and rounding. */
++static void test_decode_batch_parity(uint32_t wt) {
++    const uint32_t K = 1024, N = 8;
++    for (uint32_t G = 1; G <= ((wt == V41_WT_BF16 || wt == V41_WT_F32) ? 1u : 4u); G += 3) {
++        const uint32_t R = wt == V41_WT_Q4K && G == 4 ? 68 : 64;
++        const uint32_t D = G * K, O = G * R;
++        const uint64_t wb = test_v41_wbytes(wt, O, K);
++        TEST_ASSERT(test_v41_model_begin(wb + 4096));
++        const uint64_t off = test_v41_model_alloc(wb);
++        float *wref = malloc((size_t)O * K * 4), *x = malloc((size_t)N * D * 4);
++        float *single = malloc((size_t)N * O * 4), *batch = malloc((size_t)N * O * 4);
++        test_v41_make_weights(wt, O, K, test_v41_model_ptr(off), wref);
++        test_v41_fill_bf16(x, (uint64_t)N * D, 1.f);
++        TEST_ASSERT(test_v41_map());
++        ds4_gpu_tensor *tx = test_v41_tensor(x, (uint64_t)N * D * 4);
++        ds4_gpu_tensor *to = test_v41_tensor(NULL, (uint64_t)N * O * 4);
++        for (int rounded = 0; rounded <= 1; rounded++) {
++            for (uint32_t t = 0; t < N; t++) {
++                ds4_gpu_tensor *row = test_v41_tensor(x + (uint64_t)t * D, (uint64_t)D * 4);
++                TEST_ASSERT((G == 1 ? call_matmul(wt, to, off, K, R, row, 1, rounded)
++                                   : call_grouped(wt, to, off, G, K, R, row, 1, rounded)) != 0);
++                TEST_ASSERT(test_v41_read(to, single + (uint64_t)t * O, (uint64_t)O * 4));
++                ds4_gpu_tensor_free(row);
++            }
++            for (uint32_t n = 2; n <= N; n++) {
++                TEST_ASSERT((G == 1 ? call_matmul(wt, to, off, K, R, tx, n, rounded)
++                                   : call_grouped(wt, to, off, G, K, R, tx, n, rounded)) != 0);
++                TEST_ASSERT(test_v41_read(to, batch, (uint64_t)n * O * 4));
++                char label[80]; snprintf(label, sizeof label, "%s batch parity groups=%u n=%u round=%d", wt_name(wt), G, n, rounded);
++                test_v41_cmp(label, batch, single, (uint64_t)n * O, 0.f, 0.f);
++            }
++        }
++        ds4_gpu_tensor_free(tx); ds4_gpu_tensor_free(to);
++        free(wref); free(x); free(single); free(batch);
++    }
++}
++
+ void test_metal_v41_dense(void) {
+     test_v41_seed(0x41);
+     for (uint32_t wt = 0; wt < 5; wt++) test_dense_type(wt);
+     test_grouped_type(V41_WT_FP4X32); test_grouped_type(V41_WT_Q4K); test_grouped_type(V41_WT_FP8BLK);
+     test_sgemm();
+     test_embed_colnorm();
++    for (uint32_t wt = 0; wt < 5; wt++) test_decode_batch_parity(wt);
+ }
+ #else
+ typedef int ds4_t_metal_v41_dense_nonempty_tu;
+diff --git a/tests/t_metal_v41_group.c b/tests/t_metal_v41_group.c
+index d5c67fa..0d0823f 100644
+--- a/tests/t_metal_v41_group.c
++++ b/tests/t_metal_v41_group.c
+@@ -7,6 +7,7 @@ void test_metal_v41_group(void) {
+     test_metal_v41_attn();
+     test_metal_v41_vq();
+     test_metal_v41_bwd();
++    test_metal_v41_vision();
+ }
+ #else
+ typedef int ds4_t_metal_v41_group_nonempty_tu;
+diff --git a/tests/t_metal_v41_layer.c b/tests/t_metal_v41_layer.c
+index 76927dc..1796664 100644
+--- a/tests/t_metal_v41_layer.c
++++ b/tests/t_metal_v41_layer.c
+@@ -244,7 +244,31 @@ static void test_quant_pack_ring(void) {
+       ds4_gpu_tensor_free(tw); ds4_gpu_tensor_free(ts); free(buf); free(got); free(snap); }
+ }
+ 
++/* Uploads inside a command batch must not overwrite bytes that an earlier GPU
++ * operation still needs. V4.1 reuses its compressed-key position buffer this way. */
++static void test_ordered_upload(void) {
++    for (int batched = 0; batched <= 1; batched++) {
++    const float first[4] = { 1, 2, 3, 4 }, second[4] = { 5, 6, 7, 8 }, third[4] = { 9, 10, 11, 12 };
++    ds4_gpu_tensor *src = test_v41_tensor(first, sizeof first), *dst = test_v41_tensor(NULL, 3 * sizeof first);
++    if (batched) TEST_ASSERT(ds4_gpu_begin_commands());
++    TEST_ASSERT(ds4_gpu_tensor_copy(dst, 0, src, 0, sizeof first));
++    TEST_ASSERT(ds4_gpu_tensor_write_zerocopy(src, 0, second, sizeof second));
++    TEST_ASSERT(ds4_gpu_tensor_copy(dst, sizeof first, src, 0, sizeof first));
++    TEST_ASSERT(ds4_gpu_tensor_write(src, 0, third, sizeof third));
++    TEST_ASSERT(ds4_gpu_tensor_copy(dst, 2 * sizeof first, src, 0, sizeof first));
++    if (batched) TEST_ASSERT(ds4_gpu_end_commands());
++    else TEST_ASSERT(ds4_gpu_synchronize());
++    float got[12], expected[12];
++    memcpy(expected, first, sizeof first); memcpy(expected + 4, second, sizeof second); memcpy(expected + 8, third, sizeof third);
++    TEST_ASSERT(test_v41_read(dst, got, sizeof got));
++    test_v41_cmp(batched ? "ordered batched uploads" : "ordered async uploads", got, expected, 12, 0.f, 0.f);
++    ds4_gpu_tensor_free(src); ds4_gpu_tensor_free(dst);
++    }
++}
++
+ void test_metal_v41_layer(void) {
++    test_metal_v41_memory();
++    test_ordered_upload();
+     test_v41_seed(0x4c);
+     test_norm_hc();
+     test_router_swiglu_pool_rope();
+diff --git a/tests/t_metal_v41_memory.c b/tests/t_metal_v41_memory.c
+new file mode 100644
+index 0000000..f29d915
+--- /dev/null
++++ b/tests/t_metal_v41_memory.c
+@@ -0,0 +1,187 @@
++/* Resource lifetime regression: the C server worker has no outer ObjC pool. */
++#include "test_internal.h"
++#if !defined(DS4_NO_GPU) && defined(__APPLE__)
++/* The server test header also declares its own public now_sec(). */
++#define now_sec core_test_now_sec
++#include "../src/core/core_internal.h"
++#undef now_sec
++
++static int retry_mode, retry_calls;
++static uint32_t retry_prefix;
++static bool retry_step(ds4_engine *e, ds4_v41_state *st, const int32_t *p, uint32_t np, uint32_t *c0, uint32_t cap) {
++    (void)e; (void)p;
++    retry_calls++;
++    if (*c0 == retry_prefix) {
++        float marker = -1;
++        TEST_ASSERT(st->n_past == retry_prefix && st->ctx == 268353);
++        TEST_ASSERT(ds4_gpu_tensor_read(st->win[0], 0, &marker, 4) && marker == 0);
++        TEST_ASSERT(st->mainh_n == 128 && st->mainh_end == (int64_t)retry_prefix-1);
++        TEST_ASSERT(st->samp.seed == 123 && st->dev_sample && st->head_last_only && st->half_prefill);
++    }
++    if (retry_mode == 2 || retry_mode == 3 || cap > 512) {
++        /* Corrupt a partial state with real queued GPU work before reporting
++         * an injected OOM. The next attempt must restore the checkpoint. */
++        TEST_ASSERT(ds4_gpu_begin_commands());
++        TEST_ASSERT(ds4_gpu_tensor_fill_f32(st->win[0], 99, 1));
++        st->n_past++;
++        if (retry_mode != 2) ds4_gpu_note_memory_oom();
++        return false;
++    }
++    const uint32_t n = np-*c0 < cap ? np-*c0 : cap;
++    *c0 += n; st->n_past += n;
++    return true;
++}
++static int retry_cancel(void *ud, const char *event, int now, int total) {
++    (void)ud; (void)event; (void)now; (void)total; return 1;
++}
++
++static void test_adaptive_retry(void) {
++    TEST_ASSERT(v41_prefill_next_rows(640, 512, 140) == 500);
++    TEST_ASSERT(v41_prefill_next_rows(140, 512, 140) == 140);
++    TEST_ASSERT(v41_prefill_next_rows(257, 256, 140) == 117);
++    TEST_ASSERT(v41_prefill_next_rows(5, 10, 140) == 5);
++    TEST_ASSERT(v41_prefill_choose_rows(2048, 5487, 268353, UINT64_MAX) == 2048);
++    TEST_ASSERT(v41_prefill_choose_rows(2048, 5487, 268353, v41_prefill_estimate_bytes(512, 268353)) == 512);
++    TEST_ASSERT(v41_prefill_choose_rows(2048, 5487, 268353, 0) == 256);
++    TEST_ASSERT(v41_prefill_choose_rows(2048, 5, 1048576, 0) == 10);
++    int32_t *p = calloc(260151, 4);
++    TEST_ASSERT(p != NULL);
++    ds4_v41_state src, st;
++    v41_kvreuse_drop();
++    TEST_ASSERT(v41_state_alloc(&src, 10, 268353, 10));
++    retry_prefix = 254664; src.n_past = retry_prefix;
++    src.ng_src[0] = retry_prefix/4;
++    src.mainh_n = 128; src.mainh_end = (int64_t)retry_prefix-1;
++    v41_kvreuse_save(&src, p, retry_prefix, NULL);
++    v41_state_free(&src);
++    ds4_engine e = { .backend=DS4_BACKEND_METAL };
++    for (int test = 0; test < 4; test++) {
++        uint32_t reused = 0;
++        TEST_ASSERT(v41_kvreuse_alloc(&st, p, 260151, 268353, 2048, NULL, &reused));
++        TEST_ASSERT(reused == retry_prefix);
++        st.samp.seed = 123; st.dev_sample = st.head_last_only = st.half_prefill = 1;
++        retry_calls = 0; retry_mode = test == 1 ? 2 : test == 2 ? 3 : 0;
++        const bool ok = v41_prefill_run(&e, &st, p, 260151, NULL, &reused,
++                                       test == 3 ? retry_cancel : NULL, NULL, retry_step);
++        if (test == 0) TEST_ASSERT(ok && st.n_past == 260151 && st.cap_tok == 512 && retry_calls == 13);
++        else if (test == 2) TEST_ASSERT(!ok && st.cap_tok == 256 && retry_calls == 4);
++        else TEST_ASSERT(!ok && retry_calls == 1);
++        TEST_ASSERT(reused == retry_prefix && st.ctx == 268353);
++        TEST_ASSERT(ds4_gpu_synchronize());
++        v41_state_free(&st);
++    }
++    g_ds4_shape.n_layer = 3;
++    uint32_t reused = 0;
++    TEST_ASSERT(v41_prefill_alloc(&e, &st, p, retry_prefix+5, 268353, 2048, NULL, &reused));
++    TEST_ASSERT(reused == 0 && st.n_past == 0 && st.cap_tok >= 256);
++    v41_state_free(&st);
++    g_ds4_shape.n_layer = 2;
++    free(p); v41_kvreuse_drop();
++    fprintf(stderr, "ds4: [v41-test] adaptive prefill: OOM rollback/retry, cap floor, non-OOM failure and cancellation passed\n");
++}
++
++static void test_cached_workspace(void) {
++    const ds4_shape old_shape = g_ds4_shape;
++    const ds4_v41_cfg old_cfg = g_ds4_v41;
++    const uint32_t old_ratio = g_ds4_compress_ratios[0];
++    g_ds4_shape = (ds4_shape){ .variant=DS4_VARIANT_V41, .n_layer=2, .n_embd=32, .n_vocab=16,
++        .n_head=1, .n_head_dim=32, .n_out_group=1, .n_lora_q=16, .n_lora_o=16,
++        .n_expert=4, .n_expert_used=1, .n_ff_exp=32, .n_swa=128,
++        .n_indexer_head=1, .n_indexer_head_dim=32, .n_indexer_top_k=4, .n_hc=4 };
++    g_ds4_v41 = (ds4_v41_cfg){ .active=1, .ctx=1048576, .mtp_block=5, .n_mtp_target=1,
++        .is_kv_source={1}, .candidate_source_layer=-1 };
++    g_ds4_compress_ratios[0] = 4;
++    int32_t *prompt = calloc(g_ds4_v41.ctx, 4);
++    TEST_ASSERT(prompt != NULL);
++    const uint32_t lengths[] = {70754, 524288, 1048560};
++    for (unsigned li = 0; li < sizeof lengths / sizeof lengths[0]; li++) {
++        const uint32_t np = lengths[li], ctx = g_ds4_v41.ctx;
++        ds4_v41_state src, dst;
++        v41_kvreuse_drop();
++        TEST_ASSERT(v41_state_alloc(&src, 10, ctx, 10));
++        src.n_past = np; src.ng_src[0] = np / 4;
++        src.mainh_n = 128; src.mainh_end = (int64_t)np - 1;
++        TEST_ASSERT(ds4_gpu_tensor_fill_f32(src.comp_kv[0], 0, ds4_gpu_tensor_bytes(src.comp_kv[0]) / 4));
++        TEST_ASSERT(ds4_gpu_tensor_fill_f32(src.index_k[0], 0, ds4_gpu_tensor_bytes(src.index_k[0]) / 4));
++        TEST_ASSERT(ds4_gpu_tensor_fill_f32(src.mainh, 3, ds4_gpu_tensor_bytes(src.mainh) / 4));
++        TEST_ASSERT(ds4_gpu_tensor_fill_f32(src.logits, 7, ds4_gpu_tensor_bytes(src.logits) / 4));
++        const uint64_t tail = (uint64_t)src.ng_src[0] * DS4_V41_CKV_BYTES - 4;
++        const float marker = 42;
++        TEST_ASSERT(ds4_gpu_tensor_write(src.comp_kv[0], tail, &marker, 4));
++        v41_kvreuse_save(&src, prompt, np, NULL);
++        v41_state_free(&src);
++        for (uint32_t extra = 0; extra <= 5; extra += 5) {
++            uint32_t reused = 0;
++            TEST_ASSERT(v41_kvreuse_alloc(&dst, prompt, np + extra, ctx, 2048, NULL, &reused));
++            TEST_ASSERT(reused == np && dst.n_past == np && dst.ctx == ctx);
++            TEST_ASSERT(dst.cap_tok == DS4_MTP_MAX_BLOCK + 2u);
++            TEST_ASSERT(dst.mainh_n == 128 && dst.mainh_end == (int64_t)np - 1);
++            float value = 0;
++            TEST_ASSERT(ds4_gpu_tensor_read(dst.comp_kv[0], tail, &value, 4) && value == marker);
++            if (!extra) TEST_ASSERT(ds4_gpu_tensor_read(dst.logits, 0, &value, 4) && value == 7);
++            v41_state_free(&dst);
++        }
++        /* Simulate a checkpoint that cannot be copied (missing layer 2). A
++         * partially restored state must be discarded before cold prefill. */
++        g_ds4_shape.n_layer = 3;
++        uint32_t reused = 0;
++        TEST_ASSERT(v41_kvreuse_alloc(&dst, prompt, np + 5, ctx, 2048, NULL, &reused));
++        TEST_ASSERT(reused == 0 && dst.n_past == 0 && dst.cap_tok == 2048);
++        float value = 1;
++        TEST_ASSERT(ds4_gpu_tensor_read(dst.win[0], 0, &value, 4) && value == 0);
++        v41_state_free(&dst);
++        g_ds4_shape.n_layer = 2;
++        fprintf(stderr, "ds4: [v41-test] prefix %u: exact / +5 reuse and failed-copy cold fallback passed\n", np);
++    }
++    test_adaptive_retry();
++    v41_kvreuse_drop();
++    /* A bad embedding range rejects the forward after begin_commands. It
++     * must close that batch so the next request can submit GPU work. */
++    ds4_v41_state st;
++    TEST_ASSERT(v41_state_alloc(&st, 10, 128, 10));
++    ds4_engine e = {0}; ds4_tensor bad_weight = {0};
++    e.weights.token_embd = &bad_weight;
++    for (int i = 0; i < 8; i++) {
++        TEST_ASSERT(!v41_forward(&e, &st, prompt, 1));
++        TEST_ASSERT(ds4_gpu_begin_commands());
++        TEST_ASSERT(ds4_gpu_end_commands());
++    }
++    v41_state_free(&st);
++    free(prompt);
++    g_ds4_shape = old_shape; g_ds4_v41 = old_cfg; g_ds4_compress_ratios[0] = old_ratio;
++}
++
++void test_metal_v41_memory(void) {
++    const uint64_t bytes = 4u * 1024u * 1024u;
++    float *host = calloc(1, (size_t)bytes);
++    TEST_ASSERT(host != NULL);
++    uint64_t baseline = 0, peak = 0;
++    for (int i = 0; i < 40; i++) {
++        ds4_gpu_tensor *a = ds4_gpu_tensor_alloc(bytes), *b = ds4_gpu_tensor_alloc(bytes);
++        TEST_ASSERT(a && b);
++        host[0] = (float)i;
++        TEST_ASSERT(ds4_gpu_tensor_write(a, 0, host, bytes));
++        TEST_ASSERT(ds4_gpu_begin_commands());
++        TEST_ASSERT(ds4_gpu_tensor_copy(b, 0, a, 0, bytes));
++        TEST_ASSERT(ds4_gpu_flush_commands());
++        TEST_ASSERT(ds4_gpu_tensor_write(a, 0, host, bytes));
++        TEST_ASSERT(ds4_gpu_tensor_copy(b, 0, a, 0, bytes));
++        TEST_ASSERT(ds4_gpu_end_commands());
++        TEST_ASSERT(ds4_gpu_synchronize());
++        float got = -1;
++        TEST_ASSERT(ds4_gpu_tensor_read(b, 0, &got, sizeof got));
++        TEST_ASSERT(got == (float)i);
++        ds4_gpu_tensor_free(a); ds4_gpu_tensor_free(b);
++        const uint64_t now = ds4_gpu_current_allocated_bytes();
++        if (i == 7) baseline = peak = now;
++        if (i >= 8 && now > peak) peak = now;
++    }
++    fprintf(stderr, "ds4: [v41-test] resources after 32 warmed cycles: baseline %.2f MiB, peak %.2f MiB\n",
++            (double)baseline / 1048576., (double)peak / 1048576.);
++    TEST_ASSERT(peak <= baseline + 16u * 1024u * 1024u);
++    free(host);
++    test_cached_workspace();
++}
++#else
++typedef int ds4_t_metal_v41_memory_nonempty_tu;
++#endif
+diff --git a/tests/t_metal_v41_vision.c b/tests/t_metal_v41_vision.c
+new file mode 100644
+index 0000000..8c6fe3b
+--- /dev/null
++++ b/tests/t_metal_v41_vision.c
+@@ -0,0 +1,123 @@
++/* GPU numerical/lifetime gates for the request-local vision primitives. */
++#include "test_internal.h"
++#if !defined(DS4_NO_GPU) && defined(__APPLE__)
++#include "../ds4_gpu_v41.h"
++#include "../src/metal/metal_v41_args.h"
++
++static void vision_linear(uint32_t M, uint32_t N, uint32_t K) {
++    float *x = malloc(M*K*4), *w = malloc(N*K*4), *ref = malloc(M*N*4), *got = malloc(M*N*4), *bias = malloc(N*4);
++    uint8_t *raw = malloc(N*K*2);
++    test_v41_fill_bf16(x, M*K, 1); test_v41_fill_bf16(bias, N, .1f);
++    test_v41_make_weights(V41_WT_BF16, N, K, raw, w);
++    ds4_gpu_tensor *tx = test_v41_tensor(x, M*K*4), *tw = test_v41_tensor(raw, N*K*2), *tb = test_v41_tensor(bias, N*4);
++    ds4_gpu_tensor *to = test_v41_tensor(NULL, M*N*4);
++    TEST_ASSERT(ds4_gpu_v41_matmul_bf16_dev_tensor(to, tw, K, N, tx, M));
++    TEST_ASSERT(test_v41_read(to, got, M*N*4));
++    test_v41_ref_matmul(x, w, ref, M, N, K, 0);
++    test_v41_cmp("vision BF16 device GEMM", got, ref, M*N, 1e-5f, 1e-3f);
++    for (uint32_t i=0;i<M*N;i++) ref[i]=test_v41_bf16r(got[i]+bias[i%N]);
++    TEST_ASSERT(ds4_gpu_v41_bias_add_dev_tensor(to, tb, M, N) && test_v41_read(to, got, M*N*4));
++    test_v41_cmp("vision bias then BF16",got,ref,M*N,0,0);
++    TEST_ASSERT(!ds4_gpu_v41_matmul_bf16_dev_tensor(to, tw, K+8, N, tx, M));
++    ds4_gpu_tensor_free(tx);ds4_gpu_tensor_free(tw);ds4_gpu_tensor_free(tb);ds4_gpu_tensor_free(to);
++    free(x);free(w);free(ref);free(got);free(bias);free(raw);
++}
++static void vision_elementwise(void) {
++    enum {N=5,D=72}; float x[N*D],w[D],ref[N*D],got[N*D],gu[N*D*2];
++    test_v41_fill_bf16(x,N*D,4);test_v41_fill_bf16(w,D,1);test_v41_fill_bf16(gu,N*D*2,8);
++    ds4_gpu_tensor *tx=test_v41_tensor(x,sizeof x),*tw=test_v41_tensor(w,sizeof w),*to=test_v41_tensor(NULL,sizeof x);
++    ds4_gpu_tensor *tg=test_v41_tensor(gu,sizeof gu);
++    TEST_ASSERT(ds4_gpu_v41_rms_norm_dev_tensor(to,tx,tw,D,N,1e-6f) && test_v41_read(to,got,sizeof got));
++    for (uint32_t t=0;t<N;t++) {
++        double ss=0;for(uint32_t d=0;d<D;d++)ss+=(double)x[t*D+d]*x[t*D+d];
++        float inv=1/sqrtf((float)(ss/D)+1e-6f);
++        for(uint32_t d=0;d<D;d++)ref[t*D+d]=test_v41_bf16r(w[d]*(x[t*D+d]*inv));
++    }
++    test_v41_cmp("vision device RMSNorm",got,ref,N*D,0.01f,1e-3f);
++    TEST_ASSERT(ds4_gpu_v41_swiglu_pair_tensor(to,tg,N,D) && test_v41_read(to,got,sizeof got));
++    for(uint32_t i=0;i<N*D;i++) { uint32_t b=(i/D)*2*D+i%D;float g=gu[b];ref[i]=test_v41_bf16r(g/(1+expf(-g))*gu[b+D]); }
++    test_v41_cmp("vision unclipped SwiGLU",got,ref,N*D,0.008f,1e-3f);
++    TEST_ASSERT(ds4_gpu_v41_gelu_tensor(tx,N*D) && test_v41_read(tx,got,sizeof got));
++    for(uint32_t i=0;i<N*D;i++)ref[i]=test_v41_bf16r(0.5f*x[i]*(1+erff(x[i]*0.70710678118654752f)));
++    test_v41_cmp("vision erf GELU",got,ref,N*D,0.008f,1e-3f);
++    ds4_gpu_tensor_free(tx);ds4_gpu_tensor_free(tw);ds4_gpu_tensor_free(to);ds4_gpu_tensor_free(tg);
++}
++static void vision_rope_attn(uint32_t N, int batched) {
++    const uint32_t H=2,D=64,HD=H*D,W=3*HD,NW=7;
++    float *qkv=malloc(N*W*4),*got=malloc(N*W*4),*ref=malloc(N*W*4),*prob=malloc(N*4);
++    test_v41_fill_bf16(qkv,N*W,1);memcpy(ref,qkv,N*W*4);
++    for(uint32_t t=0;t<N;t++)for(uint32_t h=0;h<H;h++)for(uint32_t j=0;j<D/2;j++) {
++        float pos=j<D/4?(float)(t/NW):(float)(t%NW);
++        float f=pos/powf(10000.f,(float)(2*(j%(D/4)))/(D/2)),c=cosf(f),s=sinf(f);
++        for(uint32_t p=0;p<2;p++) { float *b=ref+t*W+p*HD+h*D;float v=b[j],z=b[j+D/2];b[j]=test_v41_bf16r(v*c-z*s);b[j+D/2]=test_v41_bf16r(z*c+v*s); }
++    }
++    ds4_gpu_tensor *tq=test_v41_tensor(qkv,N*W*4),*to=test_v41_tensor(NULL,N*HD*4);
++    TEST_ASSERT(ds4_gpu_v41_vision_rope_tensor(tq,N,NW,H,D,10000) && test_v41_read(tq,got,N*W*4));
++    test_v41_cmp("vision 2D RoPE (V intact)",got,ref,N*W,.008f,1e-3f);
++    memcpy(qkv,got,N*W*4);
++    /* Independent scalar oracle, BF16 softmax then float accumulation. */
++    for(uint32_t t=0;t<N;t++)for(uint32_t h=0;h<H;h++) {
++        float mx=-INFINITY,den=0;
++        for(uint32_t k=0;k<N;k++) { double z=0;for(uint32_t d=0;d<D;d++)z+=(double)qkv[t*W+h*D+d]*qkv[k*W+HD+h*D+d];prob[k]=(float)z/sqrtf(D);mx=fmaxf(mx,prob[k]); }
++        for(uint32_t k=0;k<N;k++) {prob[k]=expf(prob[k]-mx);den+=prob[k];}
++        for(uint32_t k=0;k<N;k++)prob[k]=test_v41_bf16r(prob[k]/den);
++        for(uint32_t d=0;d<D;d++) {double z=0;for(uint32_t k=0;k<N;k++)z+=(double)prob[k]*qkv[k*W+2*HD+h*D+d];ref[t*HD+h*D+d]=test_v41_bf16r((float)z);}
++    }
++    uint64_t before=ds4_gpu_current_allocated_bytes(),scratch=ds4_gpu_v41_scratch_bytes();
++    for(int rep=0;rep<3;rep++) {
++        if(batched)TEST_ASSERT(ds4_gpu_begin_commands());
++        TEST_ASSERT(ds4_gpu_v41_dense_attn_tensor(to,tq,N,H,D));
++        if(batched)TEST_ASSERT(ds4_gpu_end_commands());
++        TEST_ASSERT(test_v41_read(to,got,N*HD*4));
++        test_v41_cmp("vision attention/chunk tail",got,ref,N*HD,.012f,1e-3f);
++        TEST_ASSERT(ds4_gpu_current_allocated_bytes() <= before+(1ull<<20));
++        TEST_ASSERT(ds4_gpu_v41_scratch_bytes()==scratch);
++    }
++    ds4_gpu_tensor_free(tq);ds4_gpu_tensor_free(to);free(qkv);free(got);free(ref);free(prob);
++}
++static void vision_rows_unfold(void) {
++    enum{NH=5,NW=7,D=8,R=3,OH=2,OW=3,OUT=OH*OW*D*R*R};
++    float x[NH*NW*D],got[OUT],ref[OUT];for(uint32_t i=0;i<NH*NW*D;i++)x[i]=(float)i;
++    ds4_gpu_tensor *tx=test_v41_tensor(x,sizeof x),*to=test_v41_tensor(NULL,sizeof got);
++    TEST_ASSERT(ds4_gpu_v41_vision_unfold_tensor(to,tx,NH,NW,D,R) && test_v41_read(to,got,sizeof got));
++    for(uint32_t y=0;y<OH;y++)for(uint32_t z=0;z<OW;z++)for(uint32_t d=0;d<D;d++)for(uint32_t a=0;a<R;a++)for(uint32_t b=0;b<R;b++)
++        ref[((y*OW+z)*D+d)*R*R+a*R+b]=y*R+a<NH && z*R+b<NW?x[((y*R+a)*NW+z*R+b)*D+d]:0;
++    test_v41_cmp("vision unfold + zero padding",got,ref,OUT,0,0);
++    const int32_t rows[5]={-1,4,0,-1,2};ds4_gpu_tensor *tr=test_v41_tensor(rows,sizeof rows);
++    TEST_ASSERT(ds4_gpu_v41_row_select_tensor(to,tx,tr,5,D) && test_v41_read(to,got,5*D*4));
++    for(uint32_t i=0;i<5*D;i++)if(rows[i/D]>=0)ref[i]=x[rows[i/D]*D+i%D];
++    test_v41_cmp("vision mixed text/image rows",got,ref,5*D,0,0);
++    TEST_ASSERT(ds4_gpu_v41_rows_zero_tensor(to,tr,5,D) && test_v41_read(to,got,5*D*4));
++    for(uint32_t i=0;i<5*D;i++)if(rows[i/D]>=0)ref[i]=0;
++    test_v41_cmp("vision masked Engram rows",got,ref,5*D,0,0);
++    TEST_ASSERT(!ds4_gpu_v41_vision_unfold_tensor(to,tx,NH,NW,D,0));
++    ds4_gpu_tensor_free(tx);ds4_gpu_tensor_free(to);ds4_gpu_tensor_free(tr);
++}
++static void vision_router(void) {
++    enum{N=5,E=64,K=3};float bias[E],vl[E],delta[E],lg[N*E],got[N*K];int32_t sel[N*K],rows[N]={-1,0,-1,4,7};
++    TEST_ASSERT(test_v41_model_begin(4096));uint64_t off=test_v41_model_alloc(E*4);
++    for(uint32_t e=0;e<E;e++){bias[e]=e;vl[e]=E-e;delta[e]=0;}
++    delta[3]=1000;memcpy(test_v41_model_ptr(off),bias,sizeof bias);TEST_ASSERT(test_v41_map());
++    for(uint32_t i=0;i<N*E;i++)lg[i]=0;
++    ds4_gpu_tensor *tl=test_v41_tensor(lg,sizeof lg),*tb=test_v41_tensor(vl,sizeof vl),*tr=test_v41_tensor(rows,sizeof rows);
++    ds4_gpu_tensor *ts=test_v41_tensor(NULL,sizeof sel),*tw=test_v41_tensor(NULL,sizeof got);
++    for(int override=0;override<2;override++) {
++        if(override)TEST_ASSERT(ds4_gpu_v41_set_rb_override(test_v41_model_map(),test_v41_model_size(),off,delta,E));
++        TEST_ASSERT(ds4_gpu_v41_router_tensor(ts,tw,tl,test_v41_model_map(),test_v41_model_size(),off,tb,tr,N,E,K,1.5f));
++        TEST_ASSERT(test_v41_read(ts,sel,sizeof sel) && test_v41_read(tw,got,sizeof got));
++        for(uint32_t t=0;t<N;t++)for(uint32_t k=0;k<K;k++) {
++            int32_t expected=rows[t]>=0?(int32_t)k:override?(k==0?3:(int32_t)(E-k)):(int32_t)(E-1-k);
++            TEST_ASSERT(sel[t*K+k]==expected);TEST_ASSERT(fabsf(got[t*K+k]-.5f)<1e-6f);
++        }
++    }
++    TEST_ASSERT(ds4_gpu_v41_set_rb_override(test_v41_model_map(),test_v41_model_size(),off,NULL,E));
++    ds4_gpu_tensor_free(tl);ds4_gpu_tensor_free(tb);ds4_gpu_tensor_free(tr);ds4_gpu_tensor_free(ts);ds4_gpu_tensor_free(tw);
++    fprintf(stderr,"ds4: [v41-test] vision routing respects image mask and text-only correction\n");
++}
++void test_metal_v41_vision(void) {
++    test_v41_seed(0x71510);vision_linear(1,23,24);vision_linear(67,72,96);vision_linear(17,65,588);
++    vision_elementwise();vision_rope_attn(7,0);vision_rope_attn(259,1);vision_rows_unfold();vision_router();
++}
++#else
++typedef int ds4_t_metal_v41_vision_nonempty_tu;
++#endif
+diff --git a/tests/test_internal.h b/tests/test_internal.h
+index 9947488..bb57009 100644
+--- a/tests/test_internal.h
++++ b/tests/test_internal.h
+@@ -69,11 +69,13 @@ int test_v41_cmp(const char *name, const float *got, const float *ref, uint64_t
+ void test_v41_ref_matmul(const float *x, const float *w, float *out, uint32_t M, uint32_t N, uint32_t K, int round_out);
+ void test_metal_v41_dense(void);
+ void test_metal_v41_layer(void);
++void test_metal_v41_memory(void);
+ void test_metal_v41_attn(void);
+ void test_metal_v41_vq(void);
+ void test_metal_v41_bwd(void);
+ void test_metal_v41_bwd_attn(void);
+ void test_metal_v41_group(void);
++void test_metal_v41_vision(void);
+ void test_asr_units(void);   /* tests/t_asr.c: 语音识别对 ONNX 金标(2026-10-14) */
+ 
+ /* ---- t_long_context.c(hex/token 字节助手被 t_vectors.c 复用) ---- */
+diff --git a/tools/vision_check.c b/tools/vision_check.c
+new file mode 100644
+index 0000000..4dbb2ec
+--- /dev/null
++++ b/tools/vision_check.c
+@@ -0,0 +1,51 @@
++/* Full vision golden gate without mapping/loading the 113 GB language model.
++ * Usage: ds4-vision-check sidecar.gguf image.png golden.bin
++ * Run under the deployment's external memory guardian. */
++#include "src/core/core_internal.h"
++#include "ds4_v41_api.h"
++int main(int argc, char **argv) {
++    if (argc != 4) { fprintf(stderr,"usage: %s sidecar.gguf image golden\n",argv[0]);return 2; }
++    ds4_engine *e=calloc(1,sizeof *e);if(!e)return 1;
++    model_open(&e->model,argv[1],false,false);
++    const ds4_tensor *al=model_find_tensor(&e->model,"mm.1.weight");
++    const ds4_tensor *bias=model_find_tensor(&e->model,"blk.0.exp_probs_b_vl.bias");
++    if(!al || !bias)return 1;
++    g_ds4_shape.variant=DS4_VARIANT_V41;g_ds4_shape.n_embd=(uint32_t)al->dim[0];g_ds4_shape.n_expert=(uint32_t)bias->dim[0];
++    g_ds4_shape.n_layer=0;
++    for(uint32_t i=0;i<DS4_MAX_LAYER;i++) {
++        char nm[64];snprintf(nm,sizeof nm,"blk.%u.exp_probs_b_vl.bias",i);
++        if(!model_find_tensor(&e->model,nm))break;
++        g_ds4_shape.n_layer++;
++    }
++    g_vision_model=&e->model;v41_load_vision_metadata(&e->model);weights_bind_vision(&e->weights,&e->model);
++    if(!ds4_gpu_init())return 1;
++    e->backend=DS4_BACKEND_METAL;e->metal_ready=true;
++    uint64_t before=ds4_gpu_current_allocated_bytes();
++    int rc=ds4_engine_v41_vision_golden(e,argv[2],argv[3]);
++    /* Fail after one completed ViT block, then retry the SAME prepared image.
++     * This guards the OOM/retry lifetime without exhausting the host's RAM. */
++    FILE *f=fopen(argv[2],"rb");
++    if(!f)return 1;
++    fseek(f,0,SEEK_END);long len=ftell(f);rewind(f);
++    uint8_t *bytes=malloc((size_t)len);
++    if(!bytes || fread(bytes,1,(size_t)len,f)!=(size_t)len)return 1;
++    fclose(f);
++    g_ds4_v41.ctx=1048576;
++    int prompt=g_ds4_v41.image_token_id,*tokens=NULL,np=0;char err[256];
++    ds4_v41_image_src src={.data=bytes,.len=(size_t)len};
++    struct ds4_v41_images *imgs=ds4_v41_images_prepare(e,&prompt,1,&src,1,&tokens,&np,err,sizeof err);
++    if(!imgs){fprintf(stderr,"prepare failed: %s\n",err);return 1;}
++    const ds4_tensor *saved=e->weights.vis.blk[1].qkv_w;
++    e->weights.vis.blk[1].qkv_w=NULL;
++    if(v41_vision_encode(e,imgs) || imgs->encoded || imgs->embd || !imgs->img[0].patches)rc=1;
++    e->weights.vis.blk[1].qkv_w=saved;
++    if(!v41_vision_encode(e,imgs) || !imgs->encoded || imgs->img[0].patches)rc=1;
++    ds4_v41_images_free(imgs);free(tokens);free(bytes);
++    for(uint32_t i=0;i<g_ds4_shape.n_layer;i++){ds4_gpu_tensor_free(g_v41_bias_vl[i]);g_v41_bias_vl[i]=NULL;}
++    if(!ds4_gpu_synchronize())rc=1;
++    uint64_t after=ds4_gpu_current_allocated_bytes();
++    fprintf(stderr,"vision-check memory: before=%llu after=%llu scratch=%llu\n",(unsigned long long)before,(unsigned long long)after,(unsigned long long)ds4_gpu_v41_scratch_bytes());
++    if(after>before+(1ull<<20))rc=1;
++    model_close(&e->model);g_vision_model=NULL;free(e);
++    return rc;
++}

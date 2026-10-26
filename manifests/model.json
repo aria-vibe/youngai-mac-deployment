@@ -1,0 +1,942 @@
+{
+  "repo": "wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017",
+  "revision": "816e8aaa022c3dce59c2551cc1d3d280791a59a1",
+  "files": [
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L00.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "91d39b22ddc479f89c5912bce93621d88c8cef5d30584155363db47bed32056c"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L01.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "c2365afc69a7f6b2d6a05e6846d76033a55d260ac0f67694f6b749ddbbe42d31"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L02.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "d828e6c86940c4913ff9a37772f2d6346ec4b4f1cda6f7804943ce959ec2cf58"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L03.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "97804bcac63e129fa2740327fbc66e0c19b04e560d051cf630242a48c91dafe7"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L04.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "b7bf598f548f9dd5b4ab5017d935d516679436546a6fe60f0b821b5938e82d05"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L05.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "ca0a58a7540e4fa0d63b5f80fcd872054c1f3f2133fdd2052e4624536155c209"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L06.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "b4788b54c00828598467c40269af9564f2a5668f7f756511b425d677aeaba3e3"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L07.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "f947a98dc2eccc0263e8c09613babec488bb2e786d4c81a59860512b2943bb6d"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L08.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "0755256fe956d5c2abf01a6814e945736ecef0bc0905d2286b37c938c7dc072e"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L09.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "186117a40ec44e22e6a22f58b364e788e5eb4e8a264f8f03ef23a01454e5d883"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L10.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "3bee811c324f80864803ad00013dc3cae93c9b0b345f2d042eda3887b3c61b1d"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L11.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "38e670685790ebf80dc06360d029b6965aedb060c58f8036b6b1f43f0a00c1f3"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L12.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "8f068a1ae04bf45872740f89e13a92e90d8ef8e80543891da2ede0f24b925461"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L13.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "97b85d7eda7e4218455731f549afe4f836162f9b2f9596cdfa6a6d38e1a7b6d8"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L14.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "2bb3f482b281f8c7e5a8c31f6d50d0b4ff0ae8313f2cb83e2a40615cc39644c0"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L15.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "dfdac43de591ae9a0e9dc3a57098059b9f18f82a1f49ad39f475e6df68a16638"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L16.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "688f6235cc986685970677ca768eb0348f9947e1c7229fb5b8017eb7d597b5c5"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L17.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "e68543af1a98de27c129f041d1af6490136ae99036497a3ebe686e30f1033291"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L18.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "134dd470a3f61658375ba2392e72c225ac3b1a10317d0dc978ae01c00e0a6ca5"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L19.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "8d1ce85d5738e3e7aa71e261bd0797f80dde130ad00b67efc73e58641752c3e8"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L20.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "8bb7ea5f27306bc847f8fd5a9a7d986bdebdfa3214f260aec4380df46bcdf0d1"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L21.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "13a535fb6f93a98aea276ee2f64e181d29ef050d5176d2d704d18699f8dfbf9b"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L22.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "c271aa7002b6a2cc335a6d2e9e7b3aaea8f9bf857fd54a214d8f65e2a2ea114c"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L23.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "32fbe4dfe8dcc1b0a479cf41b85b8032424c77c162a1d6a12f16fb402517381e"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L24.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "b77a097d48fe80856bdca65f3ee4d0d639f73eb876eb837f732d82986bcc515b"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L25.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "c82c4a365a8fee3260ab366dd72692d8ab1aaa38bdaa407ecfeb9df91a36d75d"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L26.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "10adfad5df1b55b504ab6f4901d5c53efd3a2a76d3d9a53bd704b8ec733156ce"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L27.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "1bb64d5f12267490cccfbaa4de4be8309a38f61e473ddb73f15ab72bfa113817"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L28.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "943f4d8811894ff5fd032e3717bb8016b00bb5fce1b3a31d139f0412e93ef5ea"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L29.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "1bcfadf7ab67a5b593de525cc1df3cee72afa22c6c07c65e2994eccea2bb04f3"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L30.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "761a6fe8133ebad17608db5621912bb59cf4964c19255a887255881d5f6c27c8"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L31.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "9a3d1c1d12920c2628c252aad87372f609b8c1f89794b2190a3982aaf0cc96b6"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L32.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "096603e6665527f32af9781a8e1ec1ca7a06aaaaf7112f23332924e7c2d9ae85"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L33.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "1201ef01456794be225c98f682d8711b808fafd6376583bdceeb723e82a98c80"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L34.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "119f2576107027dc6307e87bd20f176648335668121c9692f8245c8f89ad9081"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L35.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "a74291f446aa59574219c809ff31237e7a1afdd8ab13d659526bd5b3d0c3041a"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L36.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "12cc4b22197e415bea5c2f08b86684fb002a3fbf4a9ea2283cfffb9a93f8d2c5"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L37.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "c4c07e58fa0679d162f602d44f2309c9bcb92298d19b54fcbdc7ab18ce161fad"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L38.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "8b4b6b597fda8d93fab8f066bc0344ef986914161f0852994c1fae91d5801c5c"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/gr_L39.bin",
+      "bytes": 1044492,
+      "algorithm": "sha256",
+      "hash": "1caff2df1c534f37943cb27a480de41ad5de19cd056d7b58da5859d6fbb2b63b"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/manifest.txt",
+      "bytes": 5823,
+      "algorithm": "git-sha1",
+      "hash": "a16d119d8bfe9d2d59cebf5927d695eae279ef16"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L00.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "ab6b3539e230ea22f92278ea0c6034c90efa5f71ca293e2e5b2da8d693b7220f"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L01.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "991ef6b17a6a995442b9bbd707f2a7ce268f0857017ee4f009f3babca64281ef"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L02.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "f77c12c342c3b14b7e047a7d663df1a0700d0e669e4388dfd8fafbd30dd71115"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L03.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "8befa8ec811c2fe26dcda61b8054dfab56582477db900b09d1fe968e328e5737"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L04.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "096d6e64d7819a80e5efda331a6e12a7c8348e271cf528648942ff846355685f"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L05.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "b62c0758f1a1da265801f02d1ce4bb68fe7eed001cfb66309b90b89ab784cb67"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L06.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "146232b4eb1e17779432ccfe104a91de3c06d0d49364fb2e5bef1f6f57ba9689"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L07.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "92fe3c81f58cb87cfe445f5dbdd942c95cbf6399af784882e23da844b11e4dbe"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L08.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "40b4ea26ca2e51f3b987cc2794fb537816e92ce4d77b9163cffb8ada41282b28"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L09.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "d0917d35dd829bf985b68309d9cd6057354225a15c2a08bab0ce28cfcee90e07"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L10.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "22a2c0d1b6a0c04ec5e86a5335469c79e4cfed971335e73afccb7a2b8fdc090b"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L11.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "a2c2a48c3ea85dbd86b7e43ef19aef9f27455ae5a517383f57935db203999b64"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L12.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "31966eafeebfbb5ec0ef92e1b9a2bbe09061257c905f38b1f82a9eeb419b8a78"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L13.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "35457ab800655a740063933fd59709f577b2cdf460ebe3c73fc4dca91fdd26a4"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L14.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "3125e84591e769334cc80601118e326b980837b2e77d85917bc63b8863c83e1a"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L16.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "d74b47dcb634ba9e8918658304497b65ca52e3a51b573a76fb8c29cd631a5dec"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L17.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "1c2b8adcb9ebba0cd1fa600359213093fd7be564661e4fc3be07fd6102d2bc18"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L18.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "b6d45d7b55095b58a2706a3d3fadf5bcce6bd7b74febf2925e13edace83f6994"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L19.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "c081421590e5a5bf9878868e16a9e416cfe0ac7710a99b02782b5b29dd11fb2f"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L20.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "96a7d3ea9dbf59660faad3206af135fcfda7fe9dba07fc8c0b47cb7d269f280f"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L21.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "7dd3c8d9c47d491a63403b08d3da8efc370380d0bca0f1bb65b61d4e294cf189"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L22.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "556ead03f528029214f278f8e52d06c876020305d6e47efc25062c7652cccae1"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L23.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "534bf1ce208e1ddc00f0ce696151b62c6635049ec4abc440267bfc2ecef092b1"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L24.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "6da47138c46f5bbd9d2836fe08c883164b930644b5358c74bea7b926f7a53af4"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L25.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "c583b454062d28370849e3c1cd7eb9cf48eeba78db6ba1efd7f382265bde79db"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L26.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "7ccff047de84464589d666b154501c2478803d94cdc73c7e946dd4b28872aa4c"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L28.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "9058f7e2527d0d673dc6b0a3ff53388638ea4f12b620ef636311862748f783b6"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L33.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "e258d0f1298127068c1fb6b8495c953c45c7244ff5ace443a99d38561f4fc990"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine/rb_L37.bin",
+      "bytes": 1544,
+      "algorithm": "sha256",
+      "hash": "9b56a2a5b7e0b0d4e56846ef080c3532efbb3b35eef37d5a45d81a8507a7e25d"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part01-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "7c057730c0d6ef39ee1fb70f6414d77b52158dcd9723186f1c5ccd78dfeba210"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part02-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "4af91e5a27d5281684f01da2e09ead814bfeedc2e9c29d85bd9b78cf90c6f478"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part03-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "6d7389c87675fb87b88a5cf0f823713936a153c3dd043372da3105964c147fe5"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part04-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "36bbeb2ecca3f3ed6f8e0795ade22f45e7bd9378f305cc3f7856bbf8c23efb7e"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part05-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "e907bf5f02022a2cccb6ec717d70f65d8dec66d5862f9b50e33e27bc96f44075"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part06-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "868ea2c346033ffaca0be01170ac3f070a9bbfd40121251a98b28e45509c4079"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part07-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "64871d704fe485e8a36f8b93d3b21d922c137b8bf1d1ab4b027e240f604e3997"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part08-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "952840a832824694ed78669ff4a67bc34b3e2b81c543bc1df1f91b0c343e5637"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part09-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "abbcfff9af93e2cef3bf55c9a574d2e33d1b53544924598dd9a8c3e846b56dde"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part10-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "99754852d98dbaa13ffba7ee9c19271d86de90876645a9b3c7a6d8c4cc89b413"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part11-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "a1f318760466b3361dd21db3b960df96d93bfca34bf3dfbebad549f6baddf265"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part12-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "c37004ebd2fb8ab953098b083e8aa91ec7ed17159cb1dbd16c0d79a841898288"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part13-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "ea5d2aca71f89a2ec8b170124318df6bcf4bffda491f6eac359f0fe43411fb29"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part14-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "4f61fd174ec2259933147877060df3764e026008e921028aa84ebbd33a4cf10a"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part15-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "1deead83972cd417399ebb41df6b7e84bd71f82445e8ae3b3d789937d0b45a88"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part16-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "369609b43a67ec64fb8a8d1b4fc085109012a1ec964e52b67da5ddcf6d46b2e9"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part17-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "23cfe0d8d3b774c39dfc55e2681405bea4ec06f5c240393d5e034654d7bcc18a"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part18-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "744bbc6e5c9fe6be3e76cbd15173ff1a01a66062fefd3629eef827db7c553f0b"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part19-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "217194e3c90ba78f7e9fb16d1a3df6a56d1a0939fd6c58ce3cf4d1aaa81bc2c0"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part20-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "485ea3fc2256f02d3d8055d06c49ab0e1bbb98ad0a8f26b34d9ac769ebeb7ae0"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part21-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "3410cb112183e90c21743bfaf51d3d4f5dabe785a17a375742b2af05e39117a8"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part22-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "6a3cbeecf74bb8f3b3fbc135464c57afe47cc057b477bd4133cb049f8ec1ee68"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part23-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "1039c98370ce28099589f1f4306db3badbf78afe56b39d3cde2462404092714b"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part24-of-40",
+      "bytes": 2838915986,
+      "algorithm": "sha256",
+      "hash": "535221c36e43b357d715388ba8faaa9f7b365ce2e586f883041386620c056629"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part25-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "3e025de4e49a63f70cfdd0bce8bfc979c52a517af5665afccf21856cb0f1e3a5"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part26-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "fc3bf96b3003f9b44b8c9697593fcdec5de638c2656fb0ab996ad3bfed76d568"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part27-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "6bcff49038cf54f6e54b7a6de88b12ddbf2373e2e0599808e9f0e7f5703e8ad3"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part28-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "b40422a0279cede9fad92eee602a2ef4b334a815d8b47cec60389d31487e512c"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part29-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "bfbc81c0df1321da9334ec744b6fac3104dd68390eefe324765a87277b0133ca"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part30-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "18b66a927e2f89a8fafbb342f4a0e3801f1142e3310d1d7b891317a8a78611e5"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part31-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "8efc8e57bea65bcdb9ac565d9b18eba8d5ed381a913c79b91a3a03b4576c288c"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part32-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "4c3615e1812341cf02fd8142d5f61848dbdcce1e925dc0683bd62a82658bec56"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part33-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "dc8bf71e09f9d0bb9cf1a7ec89bbd1a263daf550e71debb8942538043610e769"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part34-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "21b347c0df4dd2e5abd27a2bbf6466daf40f98941528a5d290b5c3b1db8361ec"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part35-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "7425fcb5141853bfc1bc0673c63d4e2af6b341ceae6989cd8f109452403aec4a"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part36-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "e6b47622003045494ebd74f440549a13821e4ea1cd452063805bf85b778445fa"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part37-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "fccf5f0f1b88d234c915a9785024f10d870e4b98abf6b4c82bd3dcec99c2979d"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part38-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "df618468ccafc1e64617de38e60ef4957c5c40bfcc25231f1226291e463b7171"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part39-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "485b8c01aa6e33b00ad300fb50cdf09302788c4c43603ed9a28aad8fe1cd12a1"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf.part40-of-40",
+      "bytes": 2838915985,
+      "algorithm": "sha256",
+      "hash": "f7fbaebc68687f2c839d3e627ae46125217a798628bb140149da2b40c13a5f47"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017.vision.gguf",
+      "bytes": 971066016,
+      "algorithm": "sha256",
+      "hash": "3a8b194a011e630e8e49a51b5f4e9821e48a9e5674e678d52c0302d6b164698c"
+    },
+    {
+      "name": "LICENSE",
+      "bytes": 1115,
+      "algorithm": "git-sha1",
+      "hash": "5973a4c99a8b7c0f2e0a58fbcd7f93b230da6b78"
+    },
+    {
+      "name": "LICENSE-DeepSeek",
+      "bytes": 1084,
+      "algorithm": "git-sha1",
+      "hash": "d62e3bef9f054f21b7fc616365850fbf879a99ff"
+    },
+    {
+      "name": "README.md",
+      "bytes": 19827,
+      "algorithm": "git-sha1",
+      "hash": "766d4a93efc1e4f5b02d4c4f4e25160e01b12941"
+    },
+    {
+      "name": "SHA256SUMS",
+      "bytes": 5358,
+      "algorithm": "git-sha1",
+      "hash": "93b00f7048b1849e54bfe72f65f26892f0ee0d44"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L00.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "91ca2f5115c5bd0f705fe2ce2c93e41e0fc3050c6f5c2ce7f5a3710561cf9b47"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L01.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "10b2e8c075e21a9b15a06105ccd262001cb934cff3195234603f8329fcf73d27"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L02.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "7ec42ecbd9d2e0da7bb3f467cb6e4168a9f0dd91b8a491914ed5ab5cdf0999ca"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L03.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "42ad167022cd412635c6835bf6938bac2bbdf301a2ef3b0a163ec4c658d36984"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L04.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "685dc5b9427d359ecb5fde6046368acd33b1e332b2a93ba54aab11b1e9d5f800"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L05.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "737af680d62710080900e1d8919ed14377aa77cad2b49e423e15e042079b97f8"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L06.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "3ec46b18891bd8ff0986626c03e0a3c60732c3fc8a800a1bea574edd15e865e1"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L07.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "f730250ac2d75fb0ef478a69c48fdfc2c4e09e9d1cffa03ca011ca105743ec78"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L08.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "2277ae38d62513c66bbec2a0e034bb70e5868641c3c2837dfe495bc5864591f5"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L09.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "1a3bcc5761d86e56e06801aa2020944b1a8bbc983c35907c1003e45036685804"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L10.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "1db6e61d281fcd228e8cce747a092bb84a9e61d13cf4d8c1b1aadbfbde8ca9f1"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L11.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "88fe9d76b3267c1cd6917aed3a089d569042bf3c9a8ef7f4975e7fe7492b457f"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L12.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "7df8f7c8a35d814338e8268509997c8db6384dd3a07d43111dd30ded63f22237"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L13.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "5345fed9a2ed7a1dc91b50b815701f39cf6b18e48561aa3d15163217b331efe7"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L14.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "8b567a02f7abcbfa344ec467251276067765033ec2919f97bfdc5ed5c6021b8c"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L15.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "1e3a53d86e1b04e4b556492acbdc84f46fb9350413696276665ab427c19387fd"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L16.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "9f4bf888cd0e534f5945a0a9fe037555726bb438b0258257d58968b50b7fadbc"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L17.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "b9e8727960cfb6dd88a8dd05f26ea9b8a5f8729930811e802f415c166afc6f13"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L18.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "6dcfd42c3bfc0d6e1c9cac10e0562ed759f7360b1524a190fe3c1feb62eda35a"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L19.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "e13f2f556b577bf22f0287535d04486af5d0ec11d1b897f822886130c58d5b8d"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L20.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "d5f8659aeef25c2316e21810d607bd7c4e1ca14fa0b179fb09e1d22a1b634312"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L21.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "9228567399734c14d7b5a81114acfe62c1b8f139d149ce0d8d683b95fef38a71"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L22.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "368d69ed4f8f78fedbff96d9a74b63703d82737ea181c3a18f87277fdbfd8ba0"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L23.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "4f470cfd5a080c0524bb785d7ce3b5e3bf8d82a5dc38d70ba1c2579dbd9ba8ea"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L24.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "3a2c19190ad7896915777562c506aaeedcaf3f55fb2ce0b0a4953bfaada70ff1"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L25.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "3da898d9bf44155c335a177cf90f8ab4d57793a5dd915aa43f3b8eea01248e8b"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L26.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "caf30ae4c2b7205db0a26a3b7cda1b3080bac71d5697e16a8d678ceb259d700d"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L27.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "48fe7d077ef36b7c25967b00af06a25931fca036bd3fbed5105e35f2ffaae4f4"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L28.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "350bd114e21c52123750298745d9ec9aa7c061b725ec7c8ecc03194b5bde5b43"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L29.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "63d814fb6fae32a9be313d7427e2fb018d648ed80d6cf2d6b836641e1a3dd90e"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L30.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "505323bca3ef8cfd35ee6deef3f9de52533bec6e7f23847979671b495bcd007c"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L31.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "f5d98b3c62dbc5e76b752d2b327267d2ed10f608b689d345d0f3fc826c421c63"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L32.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "021ccc689706c59d845f6c1848d38f3e760bb4d196279a5d50cc6f85bdc8a045"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L33.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "749a266896099c8f55b63cbae7def89687fd41e683e6f3ea533890d896e165d3"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L34.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "cfa8f7f3a68c0a8ba3576fd8a50d848368c8ff7f2836c7f9d432e7468a119d84"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L35.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "7be1dffedf1a51cbe70d64604bd0acfda1635f01ffb9056fc2ccf4356bab632e"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L36.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "ee422341f07ecbd0ecd30a42dfbe585c2805a0f443f7710b9be3ef8b55df2eb5"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L37.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "76b639be4da5ce7f6b0a70915c86a5018ef863549f538d4d0612841782b1123e"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L38.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "a8e318dd30ad7d4669fb3333e4db0d856f4d53a159aaa8ef410eef444f02e9ac"
+    },
+    {
+      "name": "posttrain-code-20261022/amp_L39.bin",
+      "bytes": 2621452,
+      "algorithm": "sha256",
+      "hash": "f0879082fc51e8801d341f04b1deb5a16273c4e68d14f5a90f8c672c5c95326d"
+    },
+    {
+      "name": "posttrain-code-20261022/base.fnv",
+      "bytes": 20,
+      "algorithm": "git-sha1",
+      "hash": "8fcd78769c3e247585e439f9c998f1f6e4f979f4"
+    }
+  ]
+}

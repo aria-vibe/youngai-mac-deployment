@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/fodelf/YoungAi.git",
+  "commit": "8bf93945cc352195cdda75ae496801d6f4a63099",
+  "patch": "patches/metal-local.patch",
+  "patch_sha256": "424f669d0c10f3070e0dc2950d4949c88d79068141b44567b99a1c586a78346d"
+}

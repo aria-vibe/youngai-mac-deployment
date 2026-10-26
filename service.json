@@ -1,0 +1,16 @@
+{
+  "host": "127.0.0.1",
+  "port_start": 9000,
+  "engine_budget_mib": 114000,
+  "max_output_tokens": 32768,
+  "rss_limit_gib": 120,
+  "footprint_limit_gib": 120,
+  "system_wired_limit_gib": 120,
+  "swap_growth_limit_mib": 8192,
+  "compressor_growth_limit_gib": 24,
+  "pressure_warning_seconds": 1800,
+  "sample_seconds": 0.5,
+  "posttrain": true,
+  "dspark": true,
+  "vision": true
+}
